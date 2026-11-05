@@ -173,12 +173,22 @@ async fn login_page(Query(query): Query<LoginPageQuery>) -> Result<Html<String>,
 async fn home_page(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Html<String>, AppError> {
-    let origin = request_origin(&state, &headers);
-    render(&HomeTemplate {
-        mcp_url: format!("{origin}/mcp"),
-        device_url: format!("{origin}/oauth/device"),
-    })
+) -> Result<Response, AppError> {
+    // The app is not a second landing page: signed-in households go
+    // straight to their dashboard, everyone else gets the sign-in form.
+    // (Marketing lives on the public website, not in this codebase.)
+    if let Some(token) = session_token(&state, &headers)
+        && db::resolve_session(&state.db, token).await?.is_some()
+    {
+        return Ok(Redirect::to("/app").into_response());
+    }
+    Ok(render(&LoginTemplate {
+        identifier: String::new(),
+        error: None,
+        notice: None,
+        next: None,
+    })?
+    .into_response())
 }
 
 async fn register_page() -> Result<Html<String>, AppError> {
@@ -2865,23 +2875,6 @@ fn safe_login_next(next: Option<&str>) -> Option<&str> {
     })
 }
 
-fn request_origin(state: &AppState, headers: &HeaderMap) -> String {
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .unwrap_or(if state.config.production {
-            "https"
-        } else {
-            "http"
-        });
-    let host = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("localhost:3000");
-    format!("{scheme}://{host}")
-}
-
 fn same_origin(method: &Method, headers: &HeaderMap) -> bool {
     if matches!(*method, Method::GET | Method::HEAD) {
         return true;
@@ -2923,13 +2916,6 @@ fn render<T: Template>(template: &T) -> Result<Html<String>, AppError> {
 }
 fn render_status<T: Template>(template: &T, status: StatusCode) -> Result<Response, AppError> {
     Ok((status, Html(template.render()?)).into_response())
-}
-
-#[derive(Template)]
-#[template(path = "home.html")]
-struct HomeTemplate {
-    mcp_url: String,
-    device_url: String,
 }
 
 #[derive(Template)]
