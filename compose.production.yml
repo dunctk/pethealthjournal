@@ -6,6 +6,8 @@ services:
     environment:
       PRODUCTION: "true"
       DEPLOYMENT_MODE: ${DEPLOYMENT_MODE:-self_hosted}
+      # Reserved switch only: no scheduled proactive worker yet.
+      PROACTIVE_AI_ENABLED: ${PROACTIVE_AI_ENABLED:-false}
       # Payment credentials are optional, ignored completely in self_hosted mode.
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
