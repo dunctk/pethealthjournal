@@ -6,7 +6,21 @@ The first complete workflow is intentionally direct:
 
 > An owner can write “Milo vomited just now”, immediately see a timestamped structured event on Milo's timeline, and undo it.
 
+**MCP-first AI direction:** ChatGPT, Claude and other MCP clients are the primary conversational interface; Pet Health Journal owns the structured records, household permissions, audit trail and manual data entry. Existing in-app chat and model-assisted free-text entry remain for compatibility, but shouldn't duplicate the client's reasoning.
+
 The application also creates expiring, revocable, read-only vet links. Share tokens are stored only as SHA-256 hashes and are displayed to the owner once.
+
+## Proactive AI and model costs
+
+**Roadmap only:** proactive monitoring is not running today. Future deterministic checks can calculate weight changes, event frequencies and similar measurable patterns without an LLM. Scheduled AI summaries would be optional, bounded and evidence-backed, never a diagnosis or emergency-monitoring guarantee.
+
+- **Hosted Free:** no automatic recurring LLM scans. ChatGPT/Claude provide conversational reasoning as the client.
+- **Hosted Plus (proposed):** opt-in proactive AI only with server-enforced *per-household* entitlements, monthly budgets, consent, scheduling and deduplicated alerts.
+- **Self-hosted:** local deterministic checks, plus an optional future AI worker using the operator's own model key and budget.
+
+`PROACTIVE_AI_ENABLED` defaults to `false`. It is currently **a startup guard, not a working analysis scheduler**. True is allowed only on self-hosted deployments with a configured model key; managed mode rejects true until paid entitlement and worker support exist. Turning it on today does **not** generate insights or notifications.
+
+Existing optional OCR, vision, in-app chat and generic record extraction may still incur backend provider costs. See [AI architecture](docs/ai-architecture.md).
 
 ## Appearance photos
 
@@ -22,11 +36,11 @@ The console keeps a dated weight history for each pet. Blood-test files are stor
 
 Imports use Mistral OCR 4 (`mistral-ocr-4-0`) with block and table extraction. The OCR text is stored alongside parsed test name, value, unit, reference range, flag, and test date. Spanish and English labels are accepted, and the original OCR text remains available for review when a row cannot be parsed. Set `MISTRAL_API_KEY` in the environment or local `.env`; never commit that file.
 
-## MCP for Codex and Claude
+## MCP for ChatGPT, Claude and other clients
 
 Pet Health exposes an authenticated MCP endpoint at `/mcp`. MCP clients can use OAuth with S256 PKCE, discovered from the standard `/.well-known/oauth-protected-resource` and `/.well-known/oauth-authorization-server` endpoints. Existing Pet Health session tokens also remain supported as revocable bearer tokens. Every tool call is scoped to that account's household.
 
-The available tools cover listing pets, reading a pet timeline, reading care context, adding a pet, recording an observation, and undoing an event. Write tools are explicit, preserve the user's original wording, and let the server choose timestamps.
+The tools support record access and structured updates. Prefer specific MCP tools such as `record_weight`, `record_symptom_event`, `record_medication` and `record_prescription`. For neutral notes, `record_observation(pet_id, message)` preserves the owner's wording **without another backend LLM call**. The legacy `record_health_event(message)` may invoke the backend model and remains available for backwards compatibility. Write tools are explicit, preserve the user's original wording, and let the server choose timestamps.
 
 For Claude Code, add the endpoint and let Claude complete the OAuth consent flow:
 
