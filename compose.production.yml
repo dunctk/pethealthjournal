@@ -5,6 +5,10 @@ services:
     restart: unless-stopped
     environment:
       PRODUCTION: "true"
+      DEPLOYMENT_MODE: ${DEPLOYMENT_MODE:-self_hosted}
+      # Payment credentials are optional, ignored completely in self_hosted mode.
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
       APP_HOST: 0.0.0.0
       APP_PORT: "3000"
       APP_USERNAME: ${APP_USERNAME:?}

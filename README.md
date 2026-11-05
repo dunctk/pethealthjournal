@@ -1,6 +1,6 @@
 # Pet Health
 
-Pet Health is an AGPL-3.0 self-hostable health timeline for multi-pet households. It uses Rust, Axum, Askama, HTMX, SeaORM, SQLite/WAL, and Rig for optional LLM-backed structured capture.
+Pet Health is a source-available, Elastic-2.0-licensed, self-hostable health timeline for multi-pet households. It uses Rust, Axum, Askama, HTMX, SeaORM, SQLite/WAL, and Rig for optional LLM-backed structured capture.
 
 The first complete workflow is intentionally direct:
 
@@ -52,6 +52,37 @@ Open `http://localhost:3000`. On a new database, `APP_USERNAME` and `APP_PASSWOR
 
 Additional owners can register with an email address. Each registration creates a separate household, and all pet, event, share, and audit queries remain household-scoped. Passwords use salted Argon2 hashes. Browser sessions are random, stored server-side as SHA-256 token hashes, expire after 30 days, and use `HttpOnly`, `SameSite=Lax`, and production-only `Secure` cookies.
 
+## Deployment modes and billing
+
+`DEPLOYMENT_MODE` defaults to `self_hosted` if unset, including when `PRODUCTION=true`. This differs from `PRODUCTION`, which only controls production storage and security checks.
+
+| Setting | Purpose |
+| --- | --- |
+| `DEPLOYMENT_MODE=self_hosted` | Default. No subscription restrictions, Stripe initialization, hosted licensing service, or Stripe credentials required. All currently implemented local application features remain available. |
+| `DEPLOYMENT_MODE=managed` | Operator-hosted SaaS deployment. Prepares the application configuration for future billing and server-side Free/Plus entitlements. |
+| `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Optional in managed mode, but must be supplied together. Ignored in self-hosted mode. Never commit real values. |
+
+Example self-hosted deployment:
+
+```env
+DEPLOYMENT_MODE=self_hosted
+# Stripe variables are unnecessary.
+```
+
+Managed SaaS configuration, once you are ready to integrate payments:
+
+```env
+DEPLOYMENT_MODE=managed
+STRIPE_SECRET_KEY=...
+STRIPE_WEBHOOK_SECRET=...
+```
+
+**Important:** These are configuration switches, not a complete payment implementation. This revision does **not** create checkout sessions, process Stripe webhooks, persist subscription state, enforce Free/Plus limits, or add premium features. Managed mode without Stripe credentials currently runs existing features without a paywall. When those features are built, entitlements must be enforced server-side across both web and MCP; self-hosted deployments must remain independent of the operator's payment infrastructure.
+
+## Licensing
+
+Current revisions are offered under [Elastic License 2.0](LICENSE), which allows source access, modification and self-hosting but restricts providing substantial software functionality as a hosted or managed service to third parties. This is **source-available**, not OSI-approved open source. Prior revisions released under AGPL-3.0 remain available under their original terms; this change does not revoke those existing grants. Third-party components retain their own licenses.
+
 ## Production data
 
 When `PRODUCTION=true`, the database location is not configurable: it resolves to:
@@ -66,7 +97,7 @@ The checked-in `compose.production.yml` is the Coolify production definition. It
 
 ```bash
 docker build -t pethealth:mvp .
-APP_USERNAME=owner APP_PASSWORD='replace-me' docker compose -f compose.production.yml up -d
+APP_USERNAME=owner APP_PASSWORD='replace-me' DEPLOYMENT_MODE=self_hosted docker compose -f compose.production.yml up -d
 ```
 
 In Coolify, route the `pethealth` service to `https://your-host:3000`. Keep the bootstrap `APP_PASSWORD` in Coolify's protected environment settings rather than adding it to the compose file. Back up the named volume containing `/persistent/pethealth.sqlite` together with its WAL files.

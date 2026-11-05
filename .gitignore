@@ -7,3 +7,6 @@
 /example_blood_tests/
 /.playwright-cli/
 /output/
+
+# Private business planning belongs in dunctk/pethealthtracker-business.
+/BUSINESS_MODEL.md

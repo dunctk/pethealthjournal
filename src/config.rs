@@ -1,5 +1,36 @@
 use anyhow::{Context, bail};
-use std::{env, path::Path};
+use std::{env, fmt, path::Path};
+
+/// Deployment behavior is independent of PRODUCTION (the latter controls storage).
+/// Absence of DEPLOYMENT_MODE is intentionally self-hosted, including in production.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeploymentMode {
+    SelfHosted,
+    Managed,
+}
+
+impl DeploymentMode {
+    fn parse(value: &str) -> anyhow::Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "self_hosted" => Ok(Self::SelfHosted),
+            "managed" => Ok(Self::Managed),
+            _ => bail!("DEPLOYMENT_MODE must be self_hosted or managed"),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct StripeConfig {
+    pub secret_key: String,
+    pub webhook_secret: String,
+}
+
+// Never accidentally emit Stripe secrets through a Config debug print.
+impl fmt::Debug for StripeConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("StripeConfig { credentials: [REDACTED] }")
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -8,6 +39,9 @@ pub struct Config {
     pub username: String,
     pub password: String,
     pub production: bool,
+    pub deployment_mode: DeploymentMode,
+    /// Optional managed-mode integration credentials; always None in self-hosted mode.
+    pub stripe: Option<StripeConfig>,
     pub database_url: String,
     pub llm_api_key: Option<String>,
     pub llm_base_url: String,
@@ -25,6 +59,14 @@ impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         let _ = dotenvy::dotenv();
         let production = env_bool("PRODUCTION");
+        let deployment_mode = DeploymentMode::parse(
+            &env::var("DEPLOYMENT_MODE").unwrap_or_else(|_| "self_hosted".to_owned()),
+        )?;
+        let stripe = stripe_config(
+            deployment_mode,
+            nonempty_env("STRIPE_SECRET_KEY"),
+            nonempty_env("STRIPE_WEBHOOK_SECRET"),
+        )?;
         let database_url = if production {
             let parent = Path::new("/persistent");
             if !parent.exists() {
@@ -50,6 +92,8 @@ impl Config {
             username,
             password,
             production,
+            deployment_mode,
+            stripe,
             database_url,
             // Prefer the provider-native name when both are present, while
             // keeping the generic name for backwards compatibility.
@@ -68,6 +112,27 @@ impl Config {
             pet_photos_dir: env::var("PET_PHOTOS_DIR")
                 .unwrap_or_else(|_| "./data/pet_photos".to_owned()),
         })
+    }
+}
+
+/// In self-hosted mode, no billing integration is loaded or required.
+/// Managed mode may run before checkout is implemented; if credentials are
+/// supplied, they must form a complete pair.
+fn stripe_config(
+    mode: DeploymentMode,
+    secret_key: Option<String>,
+    webhook_secret: Option<String>,
+) -> anyhow::Result<Option<StripeConfig>> {
+    if mode == DeploymentMode::SelfHosted {
+        return Ok(None);
+    }
+    match (secret_key, webhook_secret) {
+        (Some(secret_key), Some(webhook_secret)) => Ok(Some(StripeConfig {
+            secret_key,
+            webhook_secret,
+        })),
+        (None, None) => Ok(None),
+        _ => bail!("managed mode requires both STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET, or neither"),
     }
 }
 
@@ -98,6 +163,8 @@ mod tests {
             username: String::new(),
             password: String::new(),
             production: true,
+            deployment_mode: DeploymentMode::SelfHosted,
+            stripe: None,
             database_url: "sqlite:///persistent/pethealth.sqlite?mode=rwc".into(),
             llm_api_key: None,
             llm_base_url: String::new(),
@@ -109,4 +176,35 @@ mod tests {
         };
         assert!(config.database_url.contains("/persistent/pethealth.sqlite"));
     }
+
+    #[test]
+    fn deployment_mode_defaults_are_explicit_and_invalid_modes_fail() {
+        assert_eq!(DeploymentMode::parse("self_hosted").unwrap(), DeploymentMode::SelfHosted);
+        assert_eq!(DeploymentMode::parse("managed").unwrap(), DeploymentMode::Managed);
+        assert!(DeploymentMode::parse("unknown").is_err());
+    }
+
+    #[test]
+    fn self_hosted_never_initializes_stripe_even_with_partial_credentials() {
+        assert!(stripe_config(DeploymentMode::SelfHosted, Some("sk_test".into()), None)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn managed_stripe_configuration_requires_both_secrets() {
+        assert!(stripe_config(DeploymentMode::Managed, None, None)
+            .unwrap()
+            .is_none());
+        assert!(stripe_config(DeploymentMode::Managed, Some("sk_test".into()), None).is_err());
+        let configured = stripe_config(
+            DeploymentMode::Managed,
+            Some("sk_test".into()),
+            Some("whsec_test".into()),
+        )
+        .unwrap();
+        assert!(configured.is_some());
+        assert!(!format!("{:?}", configured).contains("sk_test"));
+    }
 }
+

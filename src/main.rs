@@ -51,7 +51,14 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&address)
         .await
         .with_context(|| format!("failed to bind {address}"))?;
-    info!(address, database = %config.database_url, production = config.production, "pethealth ready");
+    info!(
+        address,
+        database = %config.database_url,
+        production = config.production,
+        deployment_mode = ?config.deployment_mode,
+        stripe_configured = config.stripe.is_some(),
+        "pethealth ready"
+    );
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;

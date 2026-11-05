@@ -398,6 +398,8 @@ mod tests {
             username: "owner".into(),
             password: "password".into(),
             production: false,
+            deployment_mode: crate::config::DeploymentMode::SelfHosted,
+            stripe: None,
             database_url: "sqlite::memory:".into(),
             llm_api_key: None,
             llm_base_url: String::new(),
