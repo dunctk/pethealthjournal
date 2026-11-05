@@ -132,7 +132,9 @@ fn stripe_config(
             webhook_secret,
         })),
         (None, None) => Ok(None),
-        _ => bail!("managed mode requires both STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET, or neither"),
+        _ => bail!(
+            "managed mode requires both STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET, or neither"
+        ),
     }
 }
 
@@ -179,23 +181,33 @@ mod tests {
 
     #[test]
     fn deployment_mode_defaults_are_explicit_and_invalid_modes_fail() {
-        assert_eq!(DeploymentMode::parse("self_hosted").unwrap(), DeploymentMode::SelfHosted);
-        assert_eq!(DeploymentMode::parse("managed").unwrap(), DeploymentMode::Managed);
+        assert_eq!(
+            DeploymentMode::parse("self_hosted").unwrap(),
+            DeploymentMode::SelfHosted
+        );
+        assert_eq!(
+            DeploymentMode::parse("managed").unwrap(),
+            DeploymentMode::Managed
+        );
         assert!(DeploymentMode::parse("unknown").is_err());
     }
 
     #[test]
     fn self_hosted_never_initializes_stripe_even_with_partial_credentials() {
-        assert!(stripe_config(DeploymentMode::SelfHosted, Some("sk_test".into()), None)
-            .unwrap()
-            .is_none());
+        assert!(
+            stripe_config(DeploymentMode::SelfHosted, Some("sk_test".into()), None)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn managed_stripe_configuration_requires_both_secrets() {
-        assert!(stripe_config(DeploymentMode::Managed, None, None)
-            .unwrap()
-            .is_none());
+        assert!(
+            stripe_config(DeploymentMode::Managed, None, None)
+                .unwrap()
+                .is_none()
+        );
         assert!(stripe_config(DeploymentMode::Managed, Some("sk_test".into()), None).is_err());
         let configured = stripe_config(
             DeploymentMode::Managed,
@@ -207,4 +219,3 @@ mod tests {
         assert!(!format!("{:?}", configured).contains("sk_test"));
     }
 }
-
