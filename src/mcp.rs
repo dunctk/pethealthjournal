@@ -699,7 +699,8 @@ fn tool_list() -> Value {
         {"name":"record_medication_adherence","description":"Record whether a scheduled prescription dose was given, partial, missed, or unknown. Use days_ago for a past calendar day; the server chooses the date.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"prescription_id":{"type":"integer"},"days_ago":{"type":"integer","minimum":0,"maximum":36500},"actual_dose_value":{"type":"number"},"actual_dose_unit":{"type":"string"},"status":{"type":"string","enum":["given","partial","missed","unknown"]},"reason":{"type":"string"},"message":{"type":"string"}},"required":["pet_id","prescription_id","status"]}},
         {"name":"upload_blood_test","description":"Store one PDF or image in this household's private area and import it with Mistral OCR 4.","inputSchema":{"type":"object","properties":{"filename":{"type":"string"},"content_base64":{"type":"string","description":"The PDF or image bytes encoded as base64."}},"required":["filename","content_base64"]}},
         {"name":"import_blood_tests","description":"OCR new PDF and image files from this household's private blood-test folder using Mistral OCR 4.","inputSchema":{"type":"object","properties":{} }},
-        {"name":"record_health_event","description":"Record one observation from the user's wording. The server chooses the timestamp and preserves the original wording.","inputSchema":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}},
+        {"name":"record_observation","description":"Save a neutral owner observation without invoking another AI model. Supply a pet_id and the original message; the server timestamps it. Do not infer symptoms, doses, diagnoses, or medication changes.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"message":{"type":"string","minLength":1,"maxLength":1000}},"required":["pet_id","message"]}},
+        {"name":"record_health_event","description":"Legacy free-text capture. May invoke an additional server-side LLM even when the MCP client is ChatGPT or Claude. Prefer specific structured record_* tools or record_observation to avoid duplicate inference.","inputSchema":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}},
         {"name":"undo_health_event","description":"Undo an active health event in the signed-in household.","inputSchema":{"type":"object","properties":{"event_id":{"type":"integer"}},"required":["event_id"]}}
     ]})
 }
@@ -1088,6 +1089,40 @@ async fn call_tool(
             .await
             .map_err(internal)?;
             serde_json::to_value(imported.iter().map(|item| json!({"filename":item.filename,"report_id":item.report_id,"message":item.message})).collect::<Vec<_>>()).map_err(internal)?
+        }
+        "record_observation" => {
+            let pet_id = integer(&args, "pet_id")?;
+            let pet = db::get_pet(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?
+                .ok_or((-32602, "That pet is not in this household.".into()))?;
+            let message = string(&args, "message")?;
+            let message = message.trim();
+            if message.is_empty() || message.chars().count() > 1000 {
+                return Err((-32602, "message must be 1 to 1000 characters.".into()));
+            }
+            // No model call or clinical inference: the original owner note is authoritative.
+            let proposal = ProposedEvent {
+                pet_name: pet.name.clone(),
+                event_type: "observation".into(),
+                concept: "owner_note".into(),
+                summary: message.chars().take(120).collect(),
+                details: None,
+                minutes_ago: None,
+            };
+            let event_id = db::create_health_event(
+                &state.db,
+                user.household_id,
+                &user.audit_actor(),
+                &pet,
+                &proposal,
+                message,
+                Utc::now(),
+                "mcp",
+            )
+            .await
+            .map_err(internal)?;
+            json!({"event_id":event_id,"pet":pet.name,"message":"Owner observation recorded without AI inference."})
         }
         "record_health_event" => {
             let message = string(&args, "message")?;
