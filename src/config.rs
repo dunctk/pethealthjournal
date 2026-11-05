@@ -40,6 +40,8 @@ pub struct Config {
     pub password: String,
     pub production: bool,
     pub deployment_mode: DeploymentMode,
+    /// Reserved request flag; there is no proactive background worker yet.
+    pub proactive_ai_requested: bool,
     /// Optional managed-mode integration credentials; always None in self-hosted mode.
     pub stripe: Option<StripeConfig>,
     pub database_url: String,
@@ -67,6 +69,13 @@ impl Config {
             nonempty_env("STRIPE_SECRET_KEY"),
             nonempty_env("STRIPE_WEBHOOK_SECRET"),
         )?;
+        let llm_api_key = first_nonempty_env(&["OPENROUTER_API_KEY", "LLM_API_KEY"]);
+        let proactive_ai_requested = env_bool("PROACTIVE_AI_ENABLED");
+        validate_proactive_ai_settings(
+            deployment_mode,
+            proactive_ai_requested,
+            llm_api_key.is_some(),
+        )?;
         let database_url = if production {
             let parent = Path::new("/persistent");
             if !parent.exists() {
@@ -93,11 +102,12 @@ impl Config {
             password,
             production,
             deployment_mode,
+            proactive_ai_requested,
             stripe,
             database_url,
             // Prefer the provider-native name when both are present, while
             // keeping the generic name for backwards compatibility.
-            llm_api_key: first_nonempty_env(&["OPENROUTER_API_KEY", "LLM_API_KEY"]),
+            llm_api_key,
             llm_base_url: nonempty_env("LLM_BASE_URL")
                 .unwrap_or_else(|| "https://openrouter.ai/api/v1".to_owned()),
             llm_model: nonempty_env("LLM_MODEL").unwrap_or_else(|| "openai/gpt-5.6-sol".to_owned()),
@@ -138,6 +148,29 @@ fn stripe_config(
     }
 }
 
+/// Future worker safety contract: only self-hosted operators with their own
+/// provider key may request proactive AI at this stage. Managed AI must
+/// eventually require per-household paid entitlements, not a global switch.
+/// No scheduled analyzer exists yet; validation does not turn one on.
+fn validate_proactive_ai_settings(
+    mode: DeploymentMode,
+    requested: bool,
+    has_model_key: bool,
+) -> anyhow::Result<()> {
+    if !requested {
+        return Ok(());
+    }
+    match mode {
+        DeploymentMode::Managed => bail!(
+            "PROACTIVE_AI_ENABLED is blocked in managed mode until household-level paid entitlements, budgets and a worker exist"
+        ),
+        DeploymentMode::SelfHosted if !has_model_key => bail!(
+            "PROACTIVE_AI_ENABLED=true requires a self-hosted operator-provided OPENROUTER_API_KEY or LLM_API_KEY"
+        ),
+        DeploymentMode::SelfHosted => Ok(()),
+    }
+}
+
 fn env_bool(key: &str) -> bool {
     matches!(
         env::var(key).as_deref(),
@@ -166,6 +199,7 @@ mod tests {
             password: String::new(),
             production: true,
             deployment_mode: DeploymentMode::SelfHosted,
+            proactive_ai_requested: false,
             stripe: None,
             database_url: "sqlite:///persistent/pethealth.sqlite?mode=rwc".into(),
             llm_api_key: None,
@@ -217,5 +251,19 @@ mod tests {
         .unwrap();
         assert!(configured.is_some());
         assert!(!format!("{:?}", configured).contains("sk_test"));
+    }
+
+    #[test]
+    fn proactive_ai_settings_fail_closed_for_managed_hosting() {
+        assert!(validate_proactive_ai_settings(DeploymentMode::Managed, false, false).is_ok());
+        assert!(validate_proactive_ai_settings(DeploymentMode::Managed, true, true).is_err());
+        assert!(validate_proactive_ai_settings(DeploymentMode::Managed, true, false).is_err());
+    }
+
+    #[test]
+    fn self_hosted_proactive_request_needs_operator_key() {
+        assert!(validate_proactive_ai_settings(DeploymentMode::SelfHosted, false, false).is_ok());
+        assert!(validate_proactive_ai_settings(DeploymentMode::SelfHosted, true, false).is_err());
+        assert!(validate_proactive_ai_settings(DeploymentMode::SelfHosted, true, true).is_ok());
     }
 }
