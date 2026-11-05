@@ -661,6 +661,16 @@ fn cookie_token<'a>(state: &AppState, headers: &'a HeaderMap) -> Option<&'a str>
 const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
     &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
+/// Pure protocol-version negotiation, extracted for tests: answer in the
+/// client's version when we speak it, else the newest we support.
+fn negotiate_protocol_version(asked: &str) -> &'static str {
+    SUPPORTED_PROTOCOL_VERSIONS
+        .iter()
+        .find(|version| *version == &asked)
+        .copied()
+        .unwrap_or(SUPPORTED_PROTOCOL_VERSIONS[0])
+}
+
 async fn handle(state: &AppState, user: &UserAccount, request: RpcRequest) -> RpcResponse {
     let id = request.id.clone();
     let result = match request.method.as_str() {
@@ -672,11 +682,7 @@ async fn handle(state: &AppState, user: &UserAccount, request: RpcRequest) -> Rp
                 .unwrap_or("");
             // Answer in the client's version when we speak it, else the
             // newest we support. The client decides whether to proceed.
-            let negotiated = if SUPPORTED_PROTOCOL_VERSIONS.contains(&asked) {
-                asked.to_owned()
-            } else {
-                SUPPORTED_PROTOCOL_VERSIONS[0].to_owned()
-            };
+            let negotiated = negotiate_protocol_version(asked).to_owned();
             Ok(json!({
                 "protocolVersion": negotiated,
                 "capabilities":{"tools":{"listChanged":false}},
@@ -724,6 +730,7 @@ fn tool_list() -> Value {
         {"name":"record_medication_adherence","description":"Record whether a scheduled prescription dose was given, partial, missed, or unknown. Use days_ago for a past calendar day; the server chooses the date.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"prescription_id":{"type":"integer"},"days_ago":{"type":"integer","minimum":0,"maximum":36500},"actual_dose_value":{"type":"number"},"actual_dose_unit":{"type":"string"},"status":{"type":"string","enum":["given","partial","missed","unknown"]},"reason":{"type":"string"},"message":{"type":"string"}},"required":["pet_id","prescription_id","status"]}},
         {"name":"upload_blood_test","description":"Store one PDF or image in this household's private area and import it with Mistral OCR 4.","inputSchema":{"type":"object","properties":{"filename":{"type":"string"},"content_base64":{"type":"string","description":"The PDF or image bytes encoded as base64."}},"required":["filename","content_base64"]}},
         {"name":"import_blood_tests","description":"OCR new PDF and image files from this household's private blood-test folder using Mistral OCR 4.","inputSchema":{"type":"object","properties":{} }},
+        {"name":"record_observation","description":"PREFERRED neutral write path: save a general note using the owner's exact words (1-1000 chars). No model is called; the server timestamps it now or by relative minutes_ago. Use this when you (the assistant) have already interpreted the user's request.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"message":{"type":"string","description":"The owner's exact words; preserved verbatim.","minLength":1,"maxLength":1000},"minutes_ago":{"type":"integer","minimum":0,"maximum":525600},"summary":{"type":"string","description":"Short label, max ~280 chars. Defaults to 'Observation recorded'."},"note":{"type":"string","description":"Optional extra detail."}},"required":["pet_id","message"]}},
         {"name":"record_health_event","description":"Legacy free-text capture. May invoke an additional server-side LLM even when the MCP client is ChatGPT or Claude. Prefer specific structured record_* tools or record_observation to avoid duplicate inference.","inputSchema":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}},
         {"name":"undo_health_event","description":"Undo an active health event in the signed-in household.","inputSchema":{"type":"object","properties":{"event_id":{"type":"integer"}},"required":["event_id"]}}
     ]})
@@ -1424,4 +1431,40 @@ async fn recompute_insights(
         &lab_points,
         now,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn negotiates_known_versions_and_falls_back_to_newest() {
+        assert_eq!(negotiate_protocol_version("2025-06-18"), "2025-06-18");
+        assert_eq!(negotiate_protocol_version("2024-11-05"), "2024-11-05");
+        assert_eq!(negotiate_protocol_version("2025-11-25"), "2025-11-25");
+        assert_eq!(negotiate_protocol_version("1999-01-01"), "2025-11-25");
+        assert_eq!(negotiate_protocol_version(""), "2025-11-25");
+    }
+
+    #[test]
+    fn tool_list_keeps_directory_required_tools() {
+        let list = tool_list();
+        let tools = list
+            .get("tools")
+            .and_then(Value::as_array)
+            .expect("tool list has tools array");
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect();
+        for required in [
+            "list_pets",
+            "get_pet_timeline",
+            "get_health_insights",
+            "record_observation",
+            "record_weight",
+        ] {
+            assert!(names.contains(&required), "missing tool: {required}");
+        }
+    }
 }
