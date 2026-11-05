@@ -399,6 +399,7 @@ mod tests {
             password: "password".into(),
             production: false,
             deployment_mode: crate::config::DeploymentMode::SelfHosted,
+            proactive_ai_requested: false,
             stripe: None,
             database_url: "sqlite::memory:".into(),
             llm_api_key: None,
