@@ -8,6 +8,16 @@
 - SeaORM over SQLite in WAL mode
 - Rig for optional model-backed event extraction
 
+## MCP-first AI and proactive cost policy
+
+- ChatGPT, Claude and other MCP clients handle primary conversations; Rust owns authoritative records and validation. Keep manual web entry accessible.
+- Prefer typed MCP writes and the neutral `record_observation` tool (no extra model call). The legacy `record_health_event` may invoke a second LLM, so don't recommend it for every assistant-generated write.
+- OCR and photo-vision are separate optional provider integrations with their own costs and privacy considerations.
+- Hosted Free must not run background LLM monitoring. Managed Plus will need consent, server-side **household-level** billing entitlement, spend caps, deduplication and a scheduler. The global managed mode does not grant permission.
+- Self-hosted proactive AI, when actually implemented, will use the operator's own provider key. `PROACTIVE_AI_ENABLED` defaults off and currently provides **configuration validation only, no worker**.
+- Persist source evidence for deterministic insights. Never diagnose, recommend medication changes or promise emergency monitoring.
+- See `docs/ai-architecture.md` for the plan; don't advertise planned insights as shipped.
+
 ## Product invariants
 
 - Current source releases use Elastic License 2.0 (source-available, not OSI open source); older AGPL revisions retain their original rights.
