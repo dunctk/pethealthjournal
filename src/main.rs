@@ -57,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
         production = config.production,
         deployment_mode = ?config.deployment_mode,
         stripe_configured = config.stripe.is_some(),
+        proactive_ai_requested = config.proactive_ai_requested,
         "pethealth ready"
     );
     axum::serve(listener, app)
