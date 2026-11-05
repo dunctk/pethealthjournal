@@ -35,6 +35,7 @@ urlencoding = "2.1"
 # Keep these transitive versions aligned with the locally audited source cache.
 time = "=0.3.53"
 zerocopy = "=0.8.54"
+hmac = "0.12"
 
 [dev-dependencies]
 tempfile = "3"

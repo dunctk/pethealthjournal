@@ -75,7 +75,9 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/mcp",
             post(crate::mcp::endpoint)
-                .layer(DefaultBodyLimit::max(ocr::MAX_UPLOAD_BYTES + 1024 * 1024)),
+                .options(mcp_preflight)
+                .layer(DefaultBodyLimit::max(ocr::MAX_UPLOAD_BYTES + 1024 * 1024))
+                .layer(middleware::from_fn(mcp_cors)),
         )
         .route(
             "/.well-known/oauth-protected-resource",
@@ -104,6 +106,50 @@ pub fn router(state: AppState) -> Router {
         .merge(protected)
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
+}
+
+/// CORS for the MCP endpoint only: browser-based MCP clients (ChatGPT /
+/// Claude web testing tools) need preflight + `Access-Control-Allow-Origin`.
+/// Deliberately no `Allow-Credentials`: browsers never send cookies
+/// cross-origin here, so the session-cookie auth fallback stays
+/// same-origin-only and bearer tokens remain the cross-origin credential.
+async fn mcp_cors(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("POST, OPTIONS"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static(
+            "authorization, content-type, mcp-protocol-version, mcp-session-id",
+        ),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_MAX_AGE,
+        HeaderValue::from_static("86400"),
+    );
+    response
+}
+
+async fn mcp_preflight() -> impl IntoResponse {
+    (
+        StatusCode::NO_CONTENT,
+        [
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            (header::ACCESS_CONTROL_ALLOW_METHODS, "POST, OPTIONS"),
+            (
+                header::ACCESS_CONTROL_ALLOW_HEADERS,
+                "authorization, content-type, mcp-protocol-version, mcp-session-id",
+            ),
+            (header::ACCESS_CONTROL_MAX_AGE, "86400"),
+        ],
+    )
 }
 
 #[derive(Deserialize, Default)]
@@ -1818,7 +1864,7 @@ async fn record_agent_event(
             None,
             Some(pending),
         )?;
-        return assistant_fragment_response(&headers, assistant_html, None, None, None);
+        return assistant_fragment_response(headers, assistant_html, None, None, None);
     }
     if let Some(change) = intent.medication_plan_change {
         let prescriptions =
@@ -1850,7 +1896,7 @@ async fn record_agent_event(
             Some(pending),
             None,
         )?;
-        return assistant_fragment_response(&headers, assistant_html, None, None, None);
+        return assistant_fragment_response(headers, assistant_html, None, None, None);
     }
     let received_at = Utc::now();
     let occurred_at = state.agent.occurred_at(&intent.event, received_at);

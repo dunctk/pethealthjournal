@@ -1,8 +1,11 @@
 mod agent;
 mod auth;
+mod billing;
 mod config;
 mod db;
 mod domain;
+mod entitlements;
+mod insights;
 mod mcp;
 mod ocr;
 mod photos;

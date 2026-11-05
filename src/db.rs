@@ -46,12 +46,11 @@ fn create_parent(url: &str) -> anyhow::Result<()> {
     if path == ":memory:" || path.is_empty() {
         return Ok(());
     }
-    if let Some(parent) = Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create database directory {}", parent.display())
-            })?;
-        }
+    if let Some(parent) = Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create database directory {}", parent.display()))?;
     }
     Ok(())
 }
@@ -383,6 +382,27 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
             ON oauth_device_codes(device_code_hash, client_id, expires_at, consumed_at);
         CREATE INDEX IF NOT EXISTS idx_oauth_user_code_active
             ON oauth_device_codes(user_code_hash, expires_at, consumed_at);
+        "#,))
+    .await?;
+    db.execute(stmt(crate::insights::MIGRATION_SQL)).await?;
+    db.execute(stmt(
+        r#"
+        CREATE TABLE IF NOT EXISTS household_subscriptions (
+            household_id INTEGER PRIMARY KEY,
+            plan TEXT NOT NULL DEFAULT 'free' CHECK(plan IN ('free','plus')),
+            stripe_customer_id TEXT,
+            stripe_subscription_id TEXT,
+            status TEXT NOT NULL DEFAULT 'none',
+            current_period_end TEXT,
+            cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (household_id) REFERENCES households(id)
+        );
+        CREATE TABLE IF NOT EXISTS stripe_events (
+            event_id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            received_at TEXT NOT NULL
+        );
         "#,
     ))
     .await?;
@@ -1291,6 +1311,59 @@ pub async fn create_health_event(
     Ok(id)
 }
 
+/// Store a neutral free-text observation with no model involvement.
+///
+/// This is the preferred no-LLM write path for MCP clients that have already
+/// interpreted the user's words (ChatGPT/Claude): the caller's `message` is
+/// preserved verbatim as `raw_input`, the server chooses the timestamp, and
+/// no inference call is made. Contrast with `record_health_event` (MCP) /
+/// `CaptureAgent` (web), which may invoke a backend model.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_observation(
+    db: &DatabaseConnection,
+    household_id: i64,
+    actor: &str,
+    pet: &Pet,
+    raw_input: &str,
+    occurred_at: DateTime<Utc>,
+    summary: Option<&str>,
+    details: Option<&str>,
+    source: &str,
+) -> anyhow::Result<i64> {
+    let summary = summary
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Observation recorded");
+    let summary: String = summary.chars().take(280).collect();
+    let now = Utc::now().to_rfc3339();
+    let transaction = db.begin().await?;
+    let row = transaction.query_one(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        r#"INSERT INTO health_events
+           (household_id,pet_id,event_type,concept,summary,raw_input,details,occurred_at,recorded_at,temporal_precision,source)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?) RETURNING id"#,
+        [
+            household_id.into(), pet.id.into(), "observation".into(), "general_observation".into(),
+            summary.into(), raw_input.into(), details.map(str::to_owned).into(),
+            occurred_at.to_rfc3339().into(), now.clone().into(), "exact".into(), source.into(),
+        ],
+    )).await?.ok_or_else(|| anyhow!("observation insert returned no id"))?;
+    let id: i64 = row.try_get("", "id")?;
+    audit(
+        &transaction,
+        household_id,
+        actor,
+        "event.created",
+        "health_event",
+        id,
+        raw_input,
+        &now,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(id)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn create_symptom_event(
     db: &DatabaseConnection,
@@ -1965,7 +2038,29 @@ pub async fn get_prescription(
             [household_id.into(), pet_id.into(), prescription_id.into()],
         ))
         .await?;
-    row.map(|value| prescription_from_row(value)).transpose()
+    row.map(prescription_from_row).transpose()
+}
+
+/// Active same-name prescriptions for one pet, used by the MCP
+/// consequential-change gate: replacing a differing active regimen requires
+/// explicit owner confirmation (`confirm:true`). Household + pet scoped.
+pub async fn list_active_prescriptions_by_name(
+    db: &DatabaseConnection,
+    household_id: i64,
+    pet_id: i64,
+    name: &str,
+) -> anyhow::Result<Vec<MedicationPrescription>> {
+    let rows = db
+        .query_all(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            r#"SELECT m.*,p.name AS pet_name FROM medication_prescriptions m
+           JOIN pets p ON p.id=m.pet_id
+           WHERE m.household_id=? AND m.pet_id=? AND m.status='active' AND m.name=? COLLATE NOCASE
+           ORDER BY m.created_at DESC"#,
+            [household_id.into(), pet_id.into(), name.into()],
+        ))
+        .await?;
+    rows.into_iter().map(prescription_from_row).collect()
 }
 
 pub async fn list_adherence(

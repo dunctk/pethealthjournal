@@ -653,15 +653,39 @@ fn cookie_token<'a>(state: &AppState, headers: &'a HeaderMap) -> Option<&'a str>
         .find_map(|(key, value)| (key == name).then_some(value))
 }
 
+/// MCP protocol versions this server speaks, newest first. `initialize`
+/// negotiates: when the client asks for a version we know, we answer in it;
+/// otherwise we answer with the newest and the client decides whether it
+/// can proceed. A single hard-coded version breaks clients that pin a
+/// different protocol date (notably ChatGPT and Claude releases).
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
+    &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+
 async fn handle(state: &AppState, user: &UserAccount, request: RpcRequest) -> RpcResponse {
     let id = request.id.clone();
     let result = match request.method.as_str() {
-        "initialize" => Ok(json!({
-            "protocolVersion":"2025-11-25",
-            "capabilities":{"tools":{"listChanged":false}},
-            "serverInfo":{"name":"pethealth","version":env!("CARGO_PKG_VERSION")}
-        })),
+        "initialize" => {
+            let asked = request
+                .params
+                .get("protocolVersion")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            // Answer in the client's version when we speak it, else the
+            // newest we support. The client decides whether to proceed.
+            let negotiated = if SUPPORTED_PROTOCOL_VERSIONS.contains(&asked) {
+                asked.to_owned()
+            } else {
+                SUPPORTED_PROTOCOL_VERSIONS[0].to_owned()
+            };
+            Ok(json!({
+                "protocolVersion": negotiated,
+                "capabilities":{"tools":{"listChanged":false}},
+                "serverInfo":{"name":"pethealth","version":env!("CARGO_PKG_VERSION")},
+                "instructions":"Pet Health Journal is a longitudinal pet health record. You (the assistant) interpret the owner's words and call structured tools; the server timestamps and preserves the original wording. Prefer record_observation or a typed record_* tool over record_health_event to avoid a second model call. Never diagnose, prescribe, or promise emergency monitoring. Findings from get_health_insights describe measured change only."
+            }))
+        }
         "notifications/initialized" => Ok(Value::Null),
+        "ping" => Ok(json!({})),
         "tools/list" => Ok(tool_list()),
         "tools/call" => call_tool(state, user, request.params).await,
         _ => Err((-32601, format!("Unknown method: {}", request.method))),
@@ -685,21 +709,21 @@ async fn handle(state: &AppState, user: &UserAccount, request: RpcRequest) -> Rp
 fn tool_list() -> Value {
     json!({"tools":[
         {"name":"list_pets","description":"List the pets in the signed-in household.","inputSchema":{"type":"object","properties":{}},"annotations":{"readOnlyHint":true}},
-        {"name":"get_pet_timeline","description":"Read active health events for one pet. The original wording is included.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
+        {"name":"get_pet_timeline","description":"Read active health events for one pet, newest first. The owner's original wording is preserved in raw_input. Prefer narrow date ranges and small limits over bulk history.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":25},"offset":{"type":"integer","minimum":0,"default":0},"since":{"type":"string","description":"Earliest date to include, YYYY-MM-DD."},"until":{"type":"string","description":"Latest date to include, YYYY-MM-DD."},"category":{"type":"string","enum":["symptom","observation","medication","measurement","vet_visit"],"description":"Filter by event type."}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
         {"name":"get_clinical_timeline","description":"Read a pet's symptoms, medications, and neutral time links between them. This is context for a vet, not a diagnosis.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
         {"name":"get_medication_plan","description":"Read a pet's current prescriptions and dose-adherence history. This is a record, not a dosing recommendation.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
         {"name":"get_health_context","description":"Read practical care context for a health concept. This is not a diagnosis.","inputSchema":{"type":"object","properties":{"concept":{"type":"string"}},"required":["concept"]},"annotations":{"readOnlyHint":true}},
-        {"name":"get_weight_history","description":"Read weight measurements over time for one pet.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
-        {"name":"get_blood_test_history","description":"Read imported blood-test values for one pet. Original reports remain stored for review.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
+        {"name":"get_weight_history","description":"Read weight measurements over time for one pet, newest first. Use since/until (YYYY-MM-DD) to bound the range.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":50},"since":{"type":"string","description":"Earliest date to include, YYYY-MM-DD."},"until":{"type":"string","description":"Latest date to include, YYYY-MM-DD."}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
+        {"name":"get_blood_test_history","description":"Read imported blood-test values for one pet, newest first. Original reports remain stored for review. Filter by date with since/until (YYYY-MM-DD).","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":25},"since":{"type":"string","description":"Earliest test date to include, YYYY-MM-DD."},"until":{"type":"string","description":"Latest test date to include, YYYY-MM-DD."}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
+        {"name":"get_health_insights","description":"Read deterministic, LLM-free health findings for one pet (weight trends, symptom frequency, adherence gaps, lab deltas), newest first. Each finding cites its source records. These describe measured changes only, never a diagnosis.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":25},"include_dismissed":{"type":"boolean","default":false}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
         {"name":"add_pet","description":"Add a pet to the signed-in household.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"species":{"type":"string"},"breed":{"type":"string"},"weight_kg":{"type":"number"}},"required":["name","species"]}},
         {"name":"record_weight","description":"Save a weight measurement for a pet.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"weight_kg":{"type":"number"},"measured_at":{"type":"string","description":"YYYY-MM-DD"},"note":{"type":"string"}},"required":["pet_id","weight_kg","measured_at"]}},
         {"name":"record_symptom_event","description":"Record a structured symptom using the user's original wording. The server timestamps it now or by relative minutes_ago; absolute timestamps are not accepted from the model.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"message":{"type":"string"},"symptom":{"type":"string","enum":["vomiting","diarrhea","reduced_appetite"]},"minutes_ago":{"type":"integer","minimum":0,"maximum":525600},"occurrence_count":{"type":"integer","minimum":1,"maximum":100},"amount":{"type":"string"},"contents":{"type":"string"},"meal_relation":{"type":"string"},"water_status":{"type":"string"},"appetite_status":{"type":"string"},"energy_status":{"type":"string"},"pain_status":{"type":"string"},"note":{"type":"string"}},"required":["pet_id","message","symptom"]}},
         {"name":"record_medication","description":"Record a medication exposure. The server timestamps administration now or by relative minutes_ago; include the exact product, active ingredient, strength, dose, route, and whether it was given, missed, extra, or vomited back.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"name":{"type":"string"},"active_ingredient":{"type":"string"},"dose_value":{"type":"number"},"dose_unit":{"type":"string"},"route":{"type":"string"},"minutes_ago":{"type":"integer","minimum":0,"maximum":525600},"status":{"type":"string","enum":["given","missed","extra","vomited_back"]},"message":{"type":"string"}},"required":["pet_id","name"]}},
-        {"name":"record_prescription","description":"Save a pet's current prescription plan, including strength, dose, frequency, and instructions. The original wording is preserved.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"name":{"type":"string"},"active_ingredient":{"type":"string"},"concentration_value":{"type":"number"},"concentration_unit":{"type":"string"},"dose_value":{"type":"number"},"dose_unit":{"type":"string"},"frequency":{"type":"string"},"route":{"type":"string"},"instructions":{"type":"string"},"started_days_ago":{"type":"integer","minimum":0,"maximum":36500},"status":{"type":"string","enum":["active","paused","stopped"]},"message":{"type":"string"}},"required":["pet_id","name"]}},
+        {"name":"record_prescription","description":"Save a pet's prescription plan (strength, dose, frequency, instructions). The owner's wording is preserved. CONFIRMATION: if the pet already has an ACTIVE prescription with the same name and different dosing, the call is rejected unless confirm:true is passed after the owner explicitly approves the change.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"name":{"type":"string"},"active_ingredient":{"type":"string"},"concentration_value":{"type":"number"},"concentration_unit":{"type":"string"},"dose_value":{"type":"number"},"dose_unit":{"type":"string"},"frequency":{"type":"string"},"route":{"type":"string"},"instructions":{"type":"string"},"started_days_ago":{"type":"integer","minimum":0,"maximum":36500},"status":{"type":"string","enum":["active","paused","stopped"]},"message":{"type":"string"},"confirm":{"type":"boolean","description":"Set true only after the owner explicitly confirms replacing a differing active prescription.","default":false}},"required":["pet_id","name"]},"annotations":{"destructiveHint":true}},
         {"name":"record_medication_adherence","description":"Record whether a scheduled prescription dose was given, partial, missed, or unknown. Use days_ago for a past calendar day; the server chooses the date.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"prescription_id":{"type":"integer"},"days_ago":{"type":"integer","minimum":0,"maximum":36500},"actual_dose_value":{"type":"number"},"actual_dose_unit":{"type":"string"},"status":{"type":"string","enum":["given","partial","missed","unknown"]},"reason":{"type":"string"},"message":{"type":"string"}},"required":["pet_id","prescription_id","status"]}},
         {"name":"upload_blood_test","description":"Store one PDF or image in this household's private area and import it with Mistral OCR 4.","inputSchema":{"type":"object","properties":{"filename":{"type":"string"},"content_base64":{"type":"string","description":"The PDF or image bytes encoded as base64."}},"required":["filename","content_base64"]}},
         {"name":"import_blood_tests","description":"OCR new PDF and image files from this household's private blood-test folder using Mistral OCR 4.","inputSchema":{"type":"object","properties":{} }},
-        {"name":"record_observation","description":"Save a neutral owner observation without invoking another AI model. Supply a pet_id and the original message; the server timestamps it. Do not infer symptoms, doses, diagnoses, or medication changes.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"message":{"type":"string","minLength":1,"maxLength":1000}},"required":["pet_id","message"]}},
         {"name":"record_health_event","description":"Legacy free-text capture. May invoke an additional server-side LLM even when the MCP client is ChatGPT or Claude. Prefer specific structured record_* tools or record_observation to avoid duplicate inference.","inputSchema":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}},
         {"name":"undo_health_event","description":"Undo an active health event in the signed-in household.","inputSchema":{"type":"object","properties":{"event_id":{"type":"integer"}},"required":["event_id"]}}
     ]})
@@ -737,14 +761,46 @@ async fn call_tool(
             let limit = args
                 .get("limit")
                 .and_then(Value::as_u64)
-                .unwrap_or(50)
+                .unwrap_or(25)
                 .clamp(1, 100);
-            serde_json::to_value(
-                db::list_events(&state.db, user.household_id, Some(pet_id), limit)
-                    .await
-                    .map_err(internal)?,
+            let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
+            let since = opt_date(&args, "since")?;
+            let until = opt_date(&args, "until")?;
+            let category = args.get("category").and_then(Value::as_str);
+            if let Some(c) = category
+                && !matches!(
+                    c,
+                    "symptom" | "observation" | "medication" | "measurement" | "vet_visit"
+                )
+            {
+                return Err((-32602, "category is not supported.".into()));
+            }
+            // Fetch one bounded page plus the offset window, then filter in
+            // memory. Pet timelines are small; this keeps date/category
+            // filtering correct without a new SQL cursor.
+            let mut events = db::list_events(
+                &state.db,
+                user.household_id,
+                Some(pet_id),
+                (limit + offset).clamp(1, 200),
             )
-            .map_err(internal)?
+            .await
+            .map_err(internal)?;
+            if let Some(since) = since {
+                events.retain(|e| e.occurred_at.date_naive() >= since);
+            }
+            if let Some(until) = until {
+                events.retain(|e| e.occurred_at.date_naive() <= until);
+            }
+            if let Some(c) = category {
+                events.retain(|e| e.event_type == c);
+            }
+            let events: Vec<_> = events
+                .into_iter()
+                .skip(offset as usize)
+                .take(limit as usize)
+                .collect();
+            serde_json::to_value(events).map_err(internal)?
         }
         "get_clinical_timeline" => {
             let pet_id = integer(&args, "pet_id")?;
@@ -812,12 +868,24 @@ async fn call_tool(
             {
                 return Err((-32602, "That pet is not in this household.".into()));
             }
-            serde_json::to_value(
-                db::list_weights(&state.db, user.household_id, pet_id)
-                    .await
-                    .map_err(internal)?,
-            )
-            .map_err(internal)?
+            let since = opt_date(&args, "since")?;
+            let until = opt_date(&args, "until")?;
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(50)
+                .clamp(1, 100) as usize;
+            let mut weights = db::list_weights(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?;
+            if let Some(since) = since {
+                weights.retain(|w| w.measured_at.date_naive() >= since);
+            }
+            if let Some(until) = until {
+                weights.retain(|w| w.measured_at.date_naive() <= until);
+            }
+            weights.truncate(limit);
+            serde_json::to_value(weights).map_err(internal)?
         }
         "get_blood_test_history" => {
             let pet_id = integer(&args, "pet_id")?;
@@ -828,12 +896,62 @@ async fn call_tool(
             {
                 return Err((-32602, "That pet is not in this household.".into()));
             }
-            serde_json::to_value(
-                db::list_lab_reports(&state.db, user.household_id, pet_id)
-                    .await
-                    .map_err(internal)?,
+            let since = opt_date(&args, "since")?;
+            let until = opt_date(&args, "until")?;
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(25)
+                .clamp(1, 50) as usize;
+            let mut reports = db::list_lab_reports(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?;
+            if since.is_some() || until.is_some() {
+                reports.retain(|r| {
+                    let Some(d) = r
+                        .test_date
+                        .as_deref()
+                        .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+                    else {
+                        return false;
+                    };
+                    since.is_none_or(|s| d >= s) && until.is_none_or(|u| d <= u)
+                });
+            }
+            reports.truncate(limit);
+            serde_json::to_value(reports).map_err(internal)?
+        }
+        "get_health_insights" => {
+            let pet_id = integer(&args, "pet_id")?;
+            let pet = db::get_pet(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?
+                .ok_or((-32602, "That pet is not in this household.".into()))?;
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(25)
+                .clamp(1, 50);
+            let include_dismissed = args
+                .get("include_dismissed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let findings = recompute_insights(state, user.household_id, &pet)
+                .await
+                .map_err(internal)?;
+            crate::insights::save_findings(&state.db, &findings)
+                .await
+                .map_err(internal)?;
+            let stored = crate::insights::list_findings(
+                &state.db,
+                user.household_id,
+                pet_id,
+                include_dismissed,
+                limit,
             )
-            .map_err(internal)?
+            .await
+            .map_err(internal)?;
+            serde_json::to_value(stored).map_err(internal)?
         }
         "add_pet" => {
             let name = string(&args, "name")?;
@@ -988,6 +1106,49 @@ async fn call_tool(
                 .map(|days| {
                     (Utc::now().date_naive() - Duration::days(days.clamp(0, 36_500))).to_string()
                 });
+            // Consequential-change gate: replacing a differing active
+            // prescription requires explicit owner confirmation. The web flow
+            // stages these for human review; the MCP path enforces the same
+            // rule via confirm:true so an assistant cannot silently rewrite
+            // dosing. Same-name + same-dose re-saves stay frictionless.
+            if status == "active"
+                && !args
+                    .get("confirm")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            {
+                let existing = db::list_active_prescriptions_by_name(
+                    &state.db,
+                    user.household_id,
+                    pet.id,
+                    &name,
+                )
+                .await
+                .map_err(internal)?;
+                if let Some(current) = existing.first() {
+                    let dose_differs = args.get("dose_value").and_then(Value::as_f64)
+                        != current.dose_value
+                        || string_opt(&args, "dose_unit") != current.dose_unit.as_deref()
+                        || string_opt(&args, "frequency") != current.frequency.as_deref();
+                    if dose_differs {
+                        return Err((
+                            -32602,
+                            format!(
+                                "{} already has an active '{}' prescription ({} {} {}). Re-send with confirm:true only after the owner explicitly approves replacing it.",
+                                pet.name,
+                                current.name,
+                                current
+                                    .dose_value
+                                    .map(|d| d.to_string())
+                                    .as_deref()
+                                    .unwrap_or("?"),
+                                current.dose_unit.as_deref().unwrap_or("?"),
+                                current.frequency.as_deref().unwrap_or("?"),
+                            ),
+                        ));
+                    }
+                }
+            }
             let prescription_id = db::create_medication_prescription(
                 &state.db,
                 user.household_id,
@@ -1096,33 +1257,32 @@ async fn call_tool(
                 .await
                 .map_err(internal)?
                 .ok_or((-32602, "That pet is not in this household.".into()))?;
+            // Neutral path: no model call. The assistant has already
+            // interpreted the request; the message is stored verbatim.
+            // Length-bounded like any other owner-supplied text field.
             let message = string(&args, "message")?;
-            let message = message.trim();
-            if message.is_empty() || message.chars().count() > 1000 {
+            if message.chars().count() > 1000 {
                 return Err((-32602, "message must be 1 to 1000 characters.".into()));
             }
-            // No model call or clinical inference: the original owner note is authoritative.
-            let proposal = ProposedEvent {
-                pet_name: pet.name.clone(),
-                event_type: "observation".into(),
-                concept: "owner_note".into(),
-                summary: message.chars().take(120).collect(),
-                details: None,
-                minutes_ago: None,
-            };
-            let event_id = db::create_health_event(
+            let minutes_ago = args
+                .get("minutes_ago")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .clamp(0, 525_600);
+            let event_id = db::create_observation(
                 &state.db,
                 user.household_id,
                 &user.audit_actor(),
                 &pet,
-                &proposal,
-                message,
-                Utc::now(),
+                &message,
+                Utc::now() - Duration::minutes(minutes_ago),
+                args.get("summary").and_then(Value::as_str),
+                args.get("note").and_then(Value::as_str),
                 "mcp",
             )
             .await
             .map_err(internal)?;
-            json!({"event_id":event_id,"pet":pet.name,"message":"Owner observation recorded without AI inference."})
+            json!({"event_id":event_id,"pet":pet.name,"message":"Observation recorded without model inference. The original wording is preserved."})
         }
         "record_health_event" => {
             let message = string(&args, "message")?;
@@ -1184,4 +1344,84 @@ fn string_opt<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 }
 fn internal(error: impl std::fmt::Display) -> (i32, String) {
     (-32603, error.to_string())
+}
+
+/// Optional `YYYY-MM-DD` argument. Rejects malformed dates loudly rather
+/// than silently ignoring the bound.
+fn opt_date(args: &Value, key: &str) -> Result<Option<chrono::NaiveDate>, (i32, String)> {
+    match args.get(key).and_then(Value::as_str) {
+        None => Ok(None),
+        Some(raw) => chrono::NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d")
+            .map(Some)
+            .map_err(|_| (-32602, format!("{key} must be YYYY-MM-DD."))),
+    }
+}
+
+/// Recompute deterministic insights for one pet from current rows.
+/// Pure reads + arithmetic: no model, no network, no diagnosis.
+async fn recompute_insights(
+    state: &AppState,
+    household_id: i64,
+    pet: &crate::domain::Pet,
+) -> anyhow::Result<Vec<crate::insights::HealthFinding>> {
+    use crate::insights::{AdherencePoint, LabPoint, SymptomPoint, WeightPoint};
+    let now = Utc::now();
+    let weights = db::list_weights(&state.db, household_id, pet.id).await?;
+    let weight_points: Vec<WeightPoint> = weights
+        .into_iter()
+        .take(200)
+        .map(|w| WeightPoint {
+            id: w.id,
+            weight_kg: w.weight_kg,
+            measured_at: w.measured_at,
+        })
+        .collect();
+    let events = db::list_events(&state.db, household_id, Some(pet.id), 200).await?;
+    let symptom_points: Vec<SymptomPoint> = events
+        .into_iter()
+        .filter(|e| e.event_type == "symptom")
+        .map(|e| SymptomPoint {
+            id: e.id,
+            symptom: e.concept.clone(),
+            occurred_at: e.occurred_at,
+            episode_id: e.symptom.as_ref().map(|s| s.episode_id.clone()),
+        })
+        .collect();
+    let rows = db::list_adherence(&state.db, household_id, pet.id, 100).await?;
+    let adherence_points: Vec<AdherencePoint> = rows
+        .into_iter()
+        .map(|a| AdherencePoint {
+            id: a.id,
+            prescription_id: a.prescription_id,
+            prescription_name: a.prescription_name.clone(),
+            scheduled_for: a.scheduled_for.clone(),
+            status: a.status.clone(),
+        })
+        .collect();
+    let reports = db::list_lab_reports(&state.db, household_id, pet.id).await?;
+    let mut lab_points: Vec<LabPoint> = Vec::new();
+    for report in &reports {
+        for result in &report.results {
+            if let Some(value) = result.value_numeric {
+                lab_points.push(LabPoint {
+                    report_id: report.id,
+                    test_name: result.test_name.clone(),
+                    value_numeric: value,
+                    unit: result.unit.clone(),
+                    test_date: report.test_date.clone(),
+                    imported_at: report.imported_at,
+                });
+            }
+        }
+    }
+    Ok(crate::insights::compute_insights(
+        household_id,
+        pet.id,
+        &pet.name,
+        &weight_points,
+        &symptom_points,
+        &adherence_points,
+        &lab_points,
+        now,
+    ))
 }

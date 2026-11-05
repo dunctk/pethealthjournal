@@ -55,6 +55,13 @@ pub struct Config {
     pub mistral_api_key: Option<String>,
     pub blood_tests_dir: String,
     pub pet_photos_dir: String,
+    /// Non-secret managed-mode display/API configuration. Secrets live in
+    /// `stripe` and are validated as a pair; these extras are safe to
+    /// expose to templates and logs.
+    pub stripe_publishable_key: Option<String>,
+    pub stripe_plus_monthly_price: Option<String>,
+    pub stripe_plus_annual_price: Option<String>,
+    pub app_base_url: Option<String>,
 }
 
 impl Config {
@@ -121,7 +128,18 @@ impl Config {
                 .unwrap_or_else(|_| "./example_blood_tests".to_owned()),
             pet_photos_dir: env::var("PET_PHOTOS_DIR")
                 .unwrap_or_else(|_| "./data/pet_photos".to_owned()),
+            stripe_publishable_key: nonempty_env("STRIPE_PUBLISHABLE_KEY"),
+            stripe_plus_monthly_price: nonempty_env("STRIPE_PLUS_MONTHLY_PRICE"),
+            stripe_plus_annual_price: nonempty_env("STRIPE_PLUS_ANNUAL_PRICE"),
+            app_base_url: nonempty_env("APP_BASE_URL"),
         })
+    }
+
+    /// True when Stripe operations are possible. Self-hosted installs report
+    /// false here and every billing path must treat that as "billing
+    /// unavailable", never as an error that blocks core records.
+    pub fn stripe_configured(&self) -> bool {
+        self.stripe.is_some()
     }
 }
 
@@ -209,8 +227,21 @@ mod tests {
             mistral_api_key: None,
             blood_tests_dir: "./example_blood_tests".into(),
             pet_photos_dir: "./data/pet_photos".into(),
+            stripe_publishable_key: None,
+            stripe_plus_monthly_price: None,
+            stripe_plus_annual_price: None,
+            app_base_url: None,
         };
         assert!(config.database_url.contains("/persistent/pethealth.sqlite"));
+        assert!(!config.stripe_configured());
+    }
+
+    #[test]
+    fn deployment_mode_defaults_to_self_hosted() {
+        assert_eq!(
+            DeploymentMode::parse("self_hosted").unwrap(),
+            DeploymentMode::SelfHosted
+        );
     }
 
     #[test]

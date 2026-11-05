@@ -409,6 +409,10 @@ mod tests {
             mistral_api_key: None,
             blood_tests_dir: root.to_string_lossy().into_owned(),
             pet_photos_dir: root.join("photos").to_string_lossy().into_owned(),
+            stripe_publishable_key: None,
+            stripe_plus_monthly_price: None,
+            stripe_plus_annual_price: None,
+            app_base_url: None,
         }
     }
     #[test]

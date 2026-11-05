@@ -1862,6 +1862,7 @@ dependencies = [
  "base64",
  "chrono",
  "dotenvy",
+ "hmac",
  "http",
  "rand 0.9.5",
  "regex",
