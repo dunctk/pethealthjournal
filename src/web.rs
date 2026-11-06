@@ -61,7 +61,10 @@ pub fn router(state: AppState) -> Router {
         .route("/account", get(account_page))
         .route("/account/password", post(change_password))
         .route("/account/api-tokens", post(create_api_token_route))
-        .route("/account/api-tokens/{id}/revoke", post(revoke_api_token_route))
+        .route(
+            "/account/api-tokens/{id}/revoke",
+            post(revoke_api_token_route),
+        )
         .route("/logout", post(logout))
         .layer(DefaultBodyLimit::max(ocr::MAX_UPLOAD_BYTES))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
@@ -447,7 +450,10 @@ async fn google_callback(
         .unwrap_or_else(|| email.split('@').next().unwrap_or("Pet owner"));
     let user = db::find_or_create_google_user(&state.db, google_sub, email, display_name).await?;
     let token = db::create_session(&state.db, user.id).await?;
-    Ok(session_redirect(&next, session_cookie(&state, &token, false)))
+    Ok(session_redirect(
+        &next,
+        session_cookie(&state, &token, false),
+    ))
 }
 
 async fn render_account_page(
@@ -487,9 +493,11 @@ async fn create_api_token_route(
     }
     let (id, token) = db::create_api_token(&state.db, user.id, user.household_id, name).await?;
     let _ = id;
-    Ok(render_account_page(&state, user, None, Some((name.to_owned(), token)))
-        .await?
-        .into_response())
+    Ok(
+        render_account_page(&state, user, None, Some((name.to_owned(), token)))
+            .await?
+            .into_response(),
+    )
 }
 
 async fn revoke_api_token_route(

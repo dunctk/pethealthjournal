@@ -4093,7 +4093,12 @@ mod tests {
         let db = test_db().await;
         let user = test_user(&db).await;
         // Wrong prefix never resolves (falls through to other auth).
-        assert!(resolve_api_token(&db, "not-a-token").await.unwrap().is_none());
+        assert!(
+            resolve_api_token(&db, "not-a-token")
+                .await
+                .unwrap()
+                .is_none()
+        );
         let (id, token) = create_api_token(&db, user.id, user.household_id, "laptop")
             .await
             .unwrap();
@@ -4106,14 +4111,26 @@ mod tests {
         assert_eq!(listed[0].id, id);
         assert_eq!(listed[0].name, "laptop");
         // Another household cannot revoke it.
-        assert!(!revoke_api_token(&db, user.household_id + 999, user.id, id).await.unwrap());
+        assert!(
+            !revoke_api_token(&db, user.household_id + 999, user.id, id)
+                .await
+                .unwrap()
+        );
         assert!(resolve_api_token(&db, &token).await.unwrap().is_some());
         // Owner revokes: gone from listings and resolution.
-        assert!(revoke_api_token(&db, user.household_id, user.id, id).await.unwrap());
+        assert!(
+            revoke_api_token(&db, user.household_id, user.id, id)
+                .await
+                .unwrap()
+        );
         assert!(list_api_tokens(&db, user.id).await.unwrap().is_empty());
         assert!(resolve_api_token(&db, &token).await.unwrap().is_none());
         // Double revoke is a no-op, not an error.
-        assert!(!revoke_api_token(&db, user.household_id, user.id, id).await.unwrap());
+        assert!(
+            !revoke_api_token(&db, user.household_id, user.id, id)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -4127,8 +4144,18 @@ mod tests {
             Some("/app".to_owned())
         );
         // Replay fails: the row was deleted on first consume.
-        assert!(consume_oauth_state(&db, "good-state").await.unwrap().is_none());
-        assert!(consume_oauth_state(&db, "unknown-state").await.unwrap().is_none());
+        assert!(
+            consume_oauth_state(&db, "good-state")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            consume_oauth_state(&db, "unknown-state")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
