@@ -1,3 +1,5 @@
+@import url("brand.css");
+
 :root {
   color-scheme: dark;
   --bg: #000;
@@ -10,7 +12,7 @@
   --text: #f4f7f8;
   --soft: #aab4ba;
   --muted: #6f7b82;
-  --active: #20c884;
+  --active: var(--brand-400);
   --active-dim: #0a3225;
   --info: #55aef3;
   --info-dim: #0b2940;
@@ -18,8 +20,8 @@
   --warning-dim: #382b08;
   --danger: #ff5864;
   --danger-dim: #3b1015;
-  --font: "Aptos", "IBM Plex Sans", "Segoe UI", sans-serif;
-  --mono: "Berkeley Mono", "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+  --font: var(--brand-font);
+  --mono: var(--brand-mono);
 }
 
 * { box-sizing: border-box; }
@@ -31,8 +33,10 @@ a { color: inherit; text-decoration: none; }
 button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible, a:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
 
 .topbar { position: fixed; inset: 0 0 auto; z-index: 20; height: 4.25rem; display: grid; grid-template-columns: 15rem 1fr 15rem; align-items: center; border-bottom: 1px solid var(--line); background: rgba(0,0,0,.94); backdrop-filter: blur(18px); }
-.brand { display: inline-flex; align-items: center; gap: .7rem; padding: 0 1.25rem; font: 700 .78rem/1 var(--mono); letter-spacing: .1em; }
+.brand { display: inline-flex; align-items: center; gap: .7rem; padding: 0 1.25rem; font: 800 .95rem/1 var(--font); letter-spacing: -.01em; }
 .brand-mark { display: grid; place-items: center; width: 2rem; height: 2rem; color: #00180f; background: var(--active); border-radius: .4rem; font: 900 .83rem/1 var(--mono); box-shadow: inset 0 1px rgba(255,255,255,.35); }
+img.brand-mark { display: block; padding: 0; background: none; box-shadow: none; font-size: 0; }
+img.zero-glyph { border-style: solid; }
 .command-status { justify-self: center; min-width: 20rem; display: flex; align-items: center; justify-content: center; gap: .65rem; color: var(--soft); border: 1px solid var(--line); background: var(--raised); padding: .55rem .85rem; border-radius: .55rem; font: 500 .78rem/1 var(--mono); }
 .command-status kbd { margin-left: auto; color: var(--muted); border: 1px solid var(--line); padding: .2rem .4rem; border-radius: .25rem; font: inherit; }
 .live-dot { width: .47rem; height: .47rem; border-radius: 50%; background: var(--active); box-shadow: 0 0 0 .2rem var(--active-dim); }

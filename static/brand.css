@@ -1,0 +1,15 @@
+/* Pet Health Journal brand tokens — CANONICAL COPY.
+   The marketing site mirrors this file at website/public/styles/brand.css.
+   Edit here, then copy it over so both surfaces stay one brand. */
+:root {
+  --brand-900: #123f2c;
+  --brand-700: #1f6f4a;
+  --brand-500: #2f9e6e;
+  --brand-400: #2bc47f;
+  --brand-300: #7fd0a8;
+  --brand-100: #e3f2e9;
+  --brand-ink: #1c2420;
+  --brand-radius: 14px;
+  --brand-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --brand-mono: ui-monospace, "SFMono-Regular", SFMono-Regular, Menlo, Consolas, monospace;
+}

@@ -2542,7 +2542,11 @@ async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 async fn favicon() -> impl IntoResponse {
-    StatusCode::NO_CONTENT
+    // Shared brand mark (static/logo.svg, mirrored from the favicon).
+    (
+        [(header::CONTENT_TYPE, "image/svg+xml")],
+        include_str!("../static/logo.svg"),
+    )
 }
 
 async fn require_auth(State(state): State<AppState>, request: Request, next: Next) -> Response {

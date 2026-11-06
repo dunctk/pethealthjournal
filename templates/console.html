@@ -12,7 +12,7 @@
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="/app" aria-label="Pet Health console"><span class="brand-mark">P+</span><span>PET HEALTH</span></a>
+    <a class="brand" href="/app" aria-label="Pet Health Journal console"><img class="brand-mark" src="/static/logo.svg" alt=""><span>Pet Health Journal</span></a>
     <details class="account-menu">
       <summary aria-label="Account menu"><span class="avatar">{{ user.initials }}</span><span>{{ user.display_name }}</span><span aria-hidden="true">⌄</span></summary>
       <div class="account-popover floating-material">
@@ -85,7 +85,7 @@
       {{ assistant_html|safe }}
       <div id="tab-body" class="tab-body">{{ tab_html|safe }}</div>
       {% when None %}
-      <section class="zero-state"><span class="zero-glyph">P+</span><h1>Add your first pet</h1><p>Add a pet to start a health history. You can record what happens and share it with your vet later.</p></section>
+      <section class="zero-state"><img class="zero-glyph" src="/static/logo.svg" alt=""><h1>Add your first pet</h1><p>Add a pet to start a health history. You can record what happens and share it with your vet later.</p></section>
       {% endmatch %}
     </main>
   </div>
