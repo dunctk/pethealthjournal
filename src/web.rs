@@ -69,6 +69,8 @@ pub fn router(state: AppState) -> Router {
         .route("/favicon.ico", get(favicon))
         .route("/static/app.css", get(css))
         .route("/static/app.js", get(js))
+        .route("/static/brand.css", get(brand_css))
+        .route("/static/logo.svg", get(logo))
         .route("/login", get(login_page).post(login))
         .route("/register", get(register_page).post(register))
         .route("/share/{token}", get(shared_pet))
@@ -2536,6 +2538,24 @@ async fn js() -> impl IntoResponse {
             "application/javascript; charset=utf-8",
         )],
         include_str!("../static/app.js"),
+    )
+}
+
+/// Canonical brand tokens (static/brand.css, mirrored by the website).
+/// Served so `@import "brand.css"` in app.css and any direct reference
+/// resolve to the same single source instead of 404ing.
+async fn brand_css() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("../static/brand.css"),
+    )
+}
+
+/// Shared brand mark as a file (templates reference it via <img>).
+async fn logo() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/svg+xml")],
+        include_str!("../static/logo.svg"),
     )
 }
 async fn healthz() -> impl IntoResponse {
