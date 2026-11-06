@@ -3,9 +3,9 @@ use crate::{
     agent::ChatReply,
     auth, db,
     domain::{
-        HealthEvent, KnowledgeArticle, LabReport, MedicationAdherence, MedicationAdministration,
-        MedicationPlanChange, MedicationPlanStop, MedicationPrescription, Pet, PetPhoto,
-        ShareGrant, TimelineEntry, UserAccount, WeightEntry,
+        ApiTokenInfo, HealthEvent, KnowledgeArticle, LabReport, MedicationAdherence,
+        MedicationAdministration, MedicationPlanChange, MedicationPlanStop, MedicationPrescription,
+        Pet, PetPhoto, ShareGrant, TimelineEntry, UserAccount, WeightEntry,
     },
     ocr, photos,
 };
@@ -60,6 +60,8 @@ pub fn router(state: AppState) -> Router {
         .route("/shares/{id}/revoke", post(revoke_share))
         .route("/account", get(account_page))
         .route("/account/password", post(change_password))
+        .route("/account/api-tokens", post(create_api_token_route))
+        .route("/account/api-tokens/{id}/revoke", post(revoke_api_token_route))
         .route("/logout", post(logout))
         .layer(DefaultBodyLimit::max(ocr::MAX_UPLOAD_BYTES))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
@@ -73,6 +75,8 @@ pub fn router(state: AppState) -> Router {
         .route("/static/logo.svg", get(logo))
         .route("/login", get(login_page).post(login))
         .route("/register", get(register_page).post(register))
+        .route("/oauth/google/start", get(google_start))
+        .route("/oauth/google/callback", get(google_callback))
         .route("/share/{token}", get(shared_pet))
         .route(
             "/mcp",
@@ -160,7 +164,10 @@ struct LoginPageQuery {
     next: Option<String>,
 }
 
-async fn login_page(Query(query): Query<LoginPageQuery>) -> Result<Html<String>, AppError> {
+async fn login_page(
+    State(state): State<AppState>,
+    Query(query): Query<LoginPageQuery>,
+) -> Result<Html<String>, AppError> {
     render(&LoginTemplate {
         identifier: String::new(),
         error: None,
@@ -169,6 +176,7 @@ async fn login_page(Query(query): Query<LoginPageQuery>) -> Result<Html<String>,
             .unwrap_or(false)
             .then(|| "Password updated. Sign in again on this device.".into()),
         next: query.next,
+        google_enabled: google_enabled(&state),
     })
 }
 
@@ -189,15 +197,17 @@ async fn home_page(
         error: None,
         notice: None,
         next: None,
+        google_enabled: google_enabled(&state),
     })?
     .into_response())
 }
 
-async fn register_page() -> Result<Html<String>, AppError> {
+async fn register_page(State(state): State<AppState>) -> Result<Html<String>, AppError> {
     render(&RegisterTemplate {
         display_name: String::new(),
         email: String::new(),
         error: None,
+        google_enabled: google_enabled(&state),
     })
 }
 
@@ -229,6 +239,7 @@ async fn login(
                 error: Some("Email/username or password is incorrect.".into()),
                 notice: None,
                 next: form.next,
+                google_enabled: google_enabled(&state),
             },
             StatusCode::UNPROCESSABLE_ENTITY,
         );
@@ -262,6 +273,7 @@ async fn register(
                 display_name,
                 email,
                 error: Some("Use a password between 12 and 128 characters.".into()),
+                google_enabled: google_enabled(&state),
             },
             StatusCode::UNPROCESSABLE_ENTITY,
         );
@@ -272,6 +284,7 @@ async fn register(
                 display_name,
                 email,
                 error: Some("An account with that email already exists.".into()),
+                google_enabled: google_enabled(&state),
             },
             StatusCode::UNPROCESSABLE_ENTITY,
         );
@@ -292,8 +305,212 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Res
     Ok(session_redirect("/login", session_cookie(&state, "", true)))
 }
 
-async fn account_page(Extension(user): Extension<UserAccount>) -> Result<Html<String>, AppError> {
-    render(&AccountTemplate { user, error: None })
+fn google_enabled(state: &AppState) -> bool {
+    state
+        .config
+        .google_client_id
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty())
+        && state
+            .config
+            .google_client_secret
+            .as_ref()
+            .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// Redirect URI registered in Google Cloud Console. Explicit APP_BASE_URL
+/// wins (managed hosting); otherwise derived proxy-aware per request, which
+/// is what self-hosters need without extra configuration.
+fn google_redirect_uri(state: &AppState, headers: &HeaderMap) -> String {
+    if let Some(base) = state.config.app_base_url.as_deref() {
+        return format!("{}/oauth/google/callback", base.trim_end_matches('/'));
+    }
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .unwrap_or(if state.config.production {
+            "https"
+        } else {
+            "http"
+        });
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("localhost:3000");
+    format!("{scheme}://{host}/oauth/google/callback")
+}
+
+async fn google_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(client_id) = state.config.google_client_id.clone() else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    let login_state = auth::new_action_token();
+    db::create_oauth_state(&state.db, &login_state, Some("/app"), 10).await?;
+    let url = format!(
+        "https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}",
+        urlencoding::encode(&client_id),
+        urlencoding::encode(&google_redirect_uri(&state, &headers)),
+        urlencoding::encode("openid email profile"),
+        urlencoding::encode(&login_state),
+    );
+    Ok(Redirect::to(&url).into_response())
+}
+
+#[derive(Deserialize)]
+struct GoogleCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+}
+
+async fn google_callback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<GoogleCallbackQuery>,
+) -> Result<Response, AppError> {
+    // Fail closed: any provider error, missing field, or unknown/expired
+    // state lands back on the login page, never in a session.
+    let (Some(code), Some(login_state)) = (query.code, query.state) else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    if query.error.is_some() {
+        return Ok(Redirect::to("/login").into_response());
+    }
+    let next = db::consume_oauth_state(&state.db, &login_state)
+        .await?
+        .and_then(|value| safe_login_next(Some(value).as_deref()).map(str::to_owned))
+        .unwrap_or_else(|| "/app".to_owned());
+    let (Some(client_id), Some(client_secret)) = (
+        state.config.google_client_id.clone(),
+        state.config.google_client_secret.clone(),
+    ) else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    let client = reqwest::Client::new();
+    let body = format!(
+        "code={}&client_id={}&client_secret={}&redirect_uri={}&grant_type=authorization_code",
+        urlencoding::encode(&code),
+        urlencoding::encode(&client_id),
+        urlencoding::encode(&client_secret),
+        urlencoding::encode(&google_redirect_uri(&state, &headers)),
+    );
+    let token_value: serde_json::Value = client
+        .post("https://oauth2.googleapis.com/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .map_err(|error| anyhow::anyhow!("Google token exchange failed: {error}"))?
+        .error_for_status()
+        .map_err(|error| anyhow::anyhow!("Google token exchange rejected: {error}"))?
+        .json()
+        .await
+        .map_err(|error| anyhow::anyhow!("Google token response unreadable: {error}"))?;
+    let Some(access_token) = token_value
+        .get("access_token")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    let profile: serde_json::Value = client
+        .get("https://openidconnect.googleapis.com/v1/userinfo")
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|error| anyhow::anyhow!("Google profile fetch failed: {error}"))?
+        .error_for_status()
+        .map_err(|error| anyhow::anyhow!("Google profile rejected: {error}"))?
+        .json()
+        .await
+        .map_err(|error| anyhow::anyhow!("Google profile unreadable: {error}"))?;
+    let verified = profile
+        .get("email_verified")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let (Some(google_sub), Some(email)) = (
+        profile.get("sub").and_then(serde_json::Value::as_str),
+        profile.get("email").and_then(serde_json::Value::as_str),
+    ) else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    if !verified {
+        return Ok(Redirect::to("/login").into_response());
+    }
+    let display_name = profile
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| email.split('@').next().unwrap_or("Pet owner"));
+    let user = db::find_or_create_google_user(&state.db, google_sub, email, display_name).await?;
+    let token = db::create_session(&state.db, user.id).await?;
+    Ok(session_redirect(&next, session_cookie(&state, &token, false)))
+}
+
+async fn render_account_page(
+    state: &AppState,
+    user: UserAccount,
+    error: Option<String>,
+    new_token: Option<(String, String)>,
+) -> Result<Html<String>, AppError> {
+    render(&AccountTemplate {
+        tokens: db::list_api_tokens(&state.db, user.id).await?,
+        user,
+        error,
+        new_token,
+    })
+}
+
+#[derive(Deserialize)]
+struct ApiTokenForm {
+    name: String,
+}
+
+async fn create_api_token_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    Form(form): Form<ApiTokenForm>,
+) -> Result<Response, AppError> {
+    let name = form.name.trim();
+    if name.is_empty() || name.chars().count() > 80 {
+        return Ok(render_account_page(
+            &state,
+            user,
+            Some("Give the token a short name (1-80 characters).".into()),
+            None,
+        )
+        .await?
+        .into_response());
+    }
+    let (id, token) = db::create_api_token(&state.db, user.id, user.household_id, name).await?;
+    let _ = id;
+    Ok(render_account_page(&state, user, None, Some((name.to_owned(), token)))
+        .await?
+        .into_response())
+}
+
+async fn revoke_api_token_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    Path(id): Path<i64>,
+) -> Result<Response, AppError> {
+    db::revoke_api_token(&state.db, user.household_id, user.id, id).await?;
+    Ok(Redirect::to("/account").into_response())
+}
+
+async fn account_page(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+) -> Result<Html<String>, AppError> {
+    render(&AccountTemplate {
+        tokens: db::list_api_tokens(&state.db, user.id).await?,
+        user,
+        error: None,
+        new_token: None,
+    })
 }
 
 #[derive(Deserialize)]
@@ -316,8 +533,10 @@ async fn change_password(
     if !current_valid {
         return render_status(
             &AccountTemplate {
+                tokens: db::list_api_tokens(&state.db, user.id).await?,
                 user,
                 error: Some("Current password is incorrect.".into()),
+                new_token: None,
             },
             StatusCode::UNPROCESSABLE_ENTITY,
         );
@@ -325,8 +544,10 @@ async fn change_password(
     if form.new_password.chars().count() < 12 || form.new_password.chars().count() > 128 {
         return render_status(
             &AccountTemplate {
+                tokens: db::list_api_tokens(&state.db, user.id).await?,
                 user,
                 error: Some("Use a new password between 12 and 128 characters.".into()),
+                new_token: None,
             },
             StatusCode::UNPROCESSABLE_ENTITY,
         );
@@ -3182,6 +3403,7 @@ struct LoginTemplate {
     error: Option<String>,
     notice: Option<String>,
     next: Option<String>,
+    google_enabled: bool,
 }
 
 #[derive(Template)]
@@ -3190,6 +3412,7 @@ struct RegisterTemplate {
     display_name: String,
     email: String,
     error: Option<String>,
+    google_enabled: bool,
 }
 
 #[derive(Template)]
@@ -3197,6 +3420,8 @@ struct RegisterTemplate {
 struct AccountTemplate {
     user: UserAccount,
     error: Option<String>,
+    tokens: Vec<ApiTokenInfo>,
+    new_token: Option<(String, String)>,
 }
 
 #[derive(Template)]

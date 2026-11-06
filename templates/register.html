@@ -25,6 +25,7 @@
         <label>Password<span class="field-hint">12 characters minimum</span><input required minlength="12" maxlength="128" type="password" name="password" autocomplete="new-password"></label>
       <button class="button primary" type="submit">Create account</button>
       </form>
+      {% if google_enabled %}<p class="auth-switch">or</p><p><a class="button secondary" href="/oauth/google/start">Continue with Google</a></p>{% endif %}
       <p class="auth-switch">Already have an account? <a href="/login">Sign in</a></p>
     </section>
   </main>

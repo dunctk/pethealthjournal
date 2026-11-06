@@ -19,6 +19,16 @@ impl UserAccount {
     }
 }
 
+/// A personal MCP token as shown in account settings. The plaintext secret
+/// is never stored and never returned by listings — only at creation.
+#[derive(Clone, Debug, Serialize)]
+pub struct ApiTokenInfo {
+    pub id: i64,
+    pub name: String,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Pet {
     pub id: i64,

@@ -27,6 +27,7 @@
         <label>Password<input required minlength="12" maxlength="128" type="password" name="password" autocomplete="current-password"></label>
         <button class="button primary" type="submit">Sign in</button>
       </form>
+      {% if google_enabled %}<p class="auth-switch">or</p><p><a class="button secondary" href="/oauth/google/start">Continue with Google</a></p>{% endif %}
       <p class="auth-switch">New to Pet Health Journal? <a href="/register">Create an account</a> · <a href="https://pethealthjournal.com">About Pet Health Journal</a></p>
       <p class="auth-note">Pet Health Journal stores records and context. It does not diagnose, prescribe, or replace veterinary advice.</p>
     </section>

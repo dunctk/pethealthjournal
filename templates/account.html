@@ -25,6 +25,20 @@
           <button class="button primary" type="submit">Change password and sign out</button>
         </form>
       </section>
+      <section class="auth-panel settings-panel" aria-labelledby="mcp-tokens-title">
+        <h2 id="mcp-tokens-title">AI assistant tokens</h2>
+        <p>Personal bearer tokens for <em>your own</em> ChatGPT or Claude. Each token opens only your household. Revoke any time; revoking never touches your records.</p>
+        {% match new_token %}{% when Some with ((token_name, token_value)) %}<div class="auth-notice" role="status">Token “{{ token_name }}” created. Copy it now — it is shown once:<br><code>{{ token_value }}</code></div>{% when None %}{% endmatch %}
+        <form method="post" action="/account/api-tokens" class="auth-form">
+          <label>Token name<span class="field-hint">e.g. Claude on my laptop</span><input required maxlength="80" name="name" autocomplete="off"></label>
+          <button class="button primary" type="submit">Create token</button>
+        </form>
+        {% if tokens.is_empty() %}<p class="auth-note">No active tokens.</p>{% else %}<ul class="token-list">{% for token in tokens %}<li><span>{{ token.name }}</span><span class="token-meta">created {{ token.created_at }}{% match token.last_used_at %}{% when Some with (used) %} · used {{ used }}{% when None %} · never used{% endmatch %}</span><form method="post" action="/account/api-tokens/{{ token.id }}/revoke"><button class="button secondary" type="submit">Revoke</button></form></li>{% endfor %}</ul>{% endif %}
+        <details class="auth-note"><summary>Connect Claude / ChatGPT with a token</summary>
+          <p><strong>Claude Code:</strong> <code>claude mcp add --transport http pethealthjournal https://YOUR-HOST/mcp --header "Authorization: Bearer TOKEN"</code></p>
+          <p><strong>ChatGPT / other MCP clients:</strong> add remote server <code>https://YOUR-HOST/mcp</code>, choose bearer auth, paste the token. Replace YOUR-HOST with this app's hostname.</p>
+        </details>
+      </section>
     </section>
   </main>
 </body>

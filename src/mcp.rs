@@ -90,6 +90,11 @@ async fn authenticate(
     {
         return Ok(user);
     }
+    // Personal MCP tokens (phj_...): long-lived revocable credentials a
+    // member mints on their account page for their own AI assistant.
+    if let Some(user) = db::resolve_api_token(&state.db, token).await.ok().flatten() {
+        return Ok(user);
+    }
     db::resolve_session(&state.db, token)
         .await
         .ok()

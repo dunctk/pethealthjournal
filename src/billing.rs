@@ -326,6 +326,8 @@ mod tests {
             stripe_plus_monthly_price: None,
             stripe_plus_annual_price: None,
             app_base_url: None,
+            google_client_id: None,
+            google_client_secret: None,
         }
     }
 

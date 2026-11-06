@@ -62,6 +62,11 @@ pub struct Config {
     pub stripe_plus_monthly_price: Option<String>,
     pub stripe_plus_annual_price: Option<String>,
     pub app_base_url: Option<String>,
+    /// Google OAuth login ("Continue with Google"). Both must be set to
+    /// show the button; the redirect URI is derived per request from the
+    /// request origin and must be allow-listed in Google Cloud Console.
+    pub google_client_id: Option<String>,
+    pub google_client_secret: Option<String>,
 }
 
 impl Config {
@@ -132,6 +137,8 @@ impl Config {
             stripe_plus_monthly_price: nonempty_env("STRIPE_PLUS_MONTHLY_PRICE"),
             stripe_plus_annual_price: nonempty_env("STRIPE_PLUS_ANNUAL_PRICE"),
             app_base_url: nonempty_env("APP_BASE_URL"),
+            google_client_id: nonempty_env("GOOGLE_CLIENT_ID"),
+            google_client_secret: nonempty_env("GOOGLE_CLIENT_SECRET"),
         })
     }
 
@@ -231,6 +238,8 @@ mod tests {
             stripe_plus_monthly_price: None,
             stripe_plus_annual_price: None,
             app_base_url: None,
+            google_client_id: None,
+            google_client_secret: None,
         };
         assert!(config.database_url.contains("/persistent/pethealth.sqlite"));
         assert!(!config.stripe_configured());

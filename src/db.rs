@@ -86,6 +86,26 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_sessions_token_active
             ON sessions(token_hash, expires_at, revoked_at);
+        CREATE TABLE IF NOT EXISTS api_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            household_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            last_used_at TEXT,
+            revoked_at TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (household_id) REFERENCES households(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_tokens_hash
+            ON api_tokens(token_hash, revoked_at);
+        CREATE TABLE IF NOT EXISTS oauth_states (
+            state_hash TEXT PRIMARY KEY,
+            next TEXT,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS pets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             household_id INTEGER NOT NULL,
@@ -406,6 +426,7 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
         "#,
     ))
     .await?;
+    ensure_google_sub_column(db).await?;
 
     let now = Utc::now().to_rfc3339();
     db.execute(Statement::from_sql_and_values(
@@ -592,6 +613,244 @@ pub async fn revoke_session(db: &DatabaseConnection, token: &str) -> anyhow::Res
     ))
     .await?;
     Ok(())
+}
+
+/// Idempotent `users.google_sub` column for Google OAuth linking. SQLite
+/// has no `ADD COLUMN IF NOT EXISTS`, so inspect first; safe to run on
+/// every boot and on databases created before this column existed.
+async fn ensure_google_sub_column(db: &DatabaseConnection) -> anyhow::Result<()> {
+    let cols = db
+        .query_all(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "PRAGMA table_info(users)",
+            [],
+        ))
+        .await?;
+    let has = cols.iter().any(|row| {
+        row.try_get::<String>("", "name")
+            .is_ok_and(|name| name == "google_sub")
+    });
+    if !has {
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "ALTER TABLE users ADD COLUMN google_sub TEXT",
+            [],
+        ))
+        .await?;
+    }
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub)",
+        [],
+    ))
+    .await?;
+    Ok(())
+}
+
+/// Personal MCP tokens: long-lived revocable bearer credentials a household
+/// member mints for their own AI assistant. Stored as SHA-256 hashes only;
+/// the plaintext is shown once at creation.
+pub async fn create_api_token(
+    db: &DatabaseConnection,
+    user_id: i64,
+    household_id: i64,
+    name: &str,
+) -> anyhow::Result<(i64, String)> {
+    use rand::{Rng, distr::Alphanumeric};
+    let secret: String = rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(48)
+        .map(char::from)
+        .collect();
+    let token = format!("phj_{secret}");
+    let now = Utc::now().to_rfc3339();
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO api_tokens(user_id,household_id,name,token_hash,created_at) VALUES(?,?,?,?,?) RETURNING id",
+            [
+                user_id.into(),
+                household_id.into(),
+                name.into(),
+                auth::token_hash(&token).into(),
+                now.into(),
+            ],
+        ))
+        .await?
+        .ok_or_else(|| anyhow!("api token insert returned no id"))?;
+    Ok((row.try_get("", "id")?, token))
+}
+
+pub async fn resolve_api_token(
+    db: &DatabaseConnection,
+    token: &str,
+) -> anyhow::Result<Option<UserAccount>> {
+    if !token.starts_with("phj_") {
+        return Ok(None);
+    }
+    let user = db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            r#"SELECT u.id,u.household_id,u.username,u.email,u.display_name
+           FROM api_tokens t JOIN users u ON u.id=t.user_id
+           WHERE t.token_hash=? AND t.revoked_at IS NULL"#,
+            [auth::token_hash(token).into()],
+        ))
+        .await?
+        .map(user_from_row)
+        .transpose()?;
+    if user.is_some() {
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "UPDATE api_tokens SET last_used_at=? WHERE token_hash=?",
+            [
+                Utc::now().to_rfc3339().into(),
+                auth::token_hash(token).into(),
+            ],
+        ))
+        .await?;
+    }
+    Ok(user)
+}
+
+pub async fn list_api_tokens(
+    db: &DatabaseConnection,
+    user_id: i64,
+) -> anyhow::Result<Vec<crate::domain::ApiTokenInfo>> {
+    let rows = db
+        .query_all(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT id,name,created_at,last_used_at FROM api_tokens WHERE user_id=? AND revoked_at IS NULL ORDER BY created_at DESC",
+            [user_id.into()],
+        ))
+        .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(crate::domain::ApiTokenInfo {
+                id: row.try_get("", "id")?,
+                name: row.try_get("", "name")?,
+                created_at: row.try_get("", "created_at")?,
+                last_used_at: row.try_get("", "last_used_at")?,
+            })
+        })
+        .collect()
+}
+
+pub async fn revoke_api_token(
+    db: &DatabaseConnection,
+    household_id: i64,
+    user_id: i64,
+    id: i64,
+) -> anyhow::Result<bool> {
+    let res = db
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "UPDATE api_tokens SET revoked_at=? WHERE id=? AND user_id=? AND household_id=? AND revoked_at IS NULL",
+            [
+                Utc::now().to_rfc3339().into(),
+                id.into(),
+                user_id.into(),
+                household_id.into(),
+            ],
+        ))
+        .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// Short-lived OAuth `state` values (Google login). Single-use: consuming
+/// deletes the row, so replays fail closed.
+pub async fn create_oauth_state(
+    db: &DatabaseConnection,
+    state: &str,
+    next: Option<&str>,
+    ttl_minutes: i64,
+) -> anyhow::Result<()> {
+    let now = Utc::now();
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "INSERT INTO oauth_states(state_hash,next,created_at,expires_at) VALUES(?,?,?,?)",
+        [
+            auth::token_hash(state).into(),
+            next.into(),
+            now.to_rfc3339().into(),
+            (now + Duration::minutes(ttl_minutes)).to_rfc3339().into(),
+        ],
+    ))
+    .await?;
+    Ok(())
+}
+
+pub async fn consume_oauth_state(
+    db: &DatabaseConnection,
+    state: &str,
+) -> anyhow::Result<Option<String>> {
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "DELETE FROM oauth_states WHERE state_hash=? AND expires_at>? RETURNING next",
+            [
+                auth::token_hash(state).into(),
+                Utc::now().to_rfc3339().into(),
+            ],
+        ))
+        .await?;
+    match row {
+        None => Ok(None),
+        Some(row) => Ok(row.try_get("", "next")?),
+    }
+}
+
+/// Link-or-create for Google OAuth: existing `google_sub` wins; else a
+/// Google-verified email matching an existing account links the sub; else a
+/// new household is created. Callers must only pass verified emails.
+pub async fn find_or_create_google_user(
+    db: &DatabaseConnection,
+    google_sub: &str,
+    email: &str,
+    display_name: &str,
+) -> anyhow::Result<UserAccount> {
+    if let Some(row) = db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT id,household_id,username,email,display_name FROM users WHERE google_sub=?",
+            [google_sub.into()],
+        ))
+        .await?
+    {
+        return user_from_row(row);
+    }
+    if let Some(row) = db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT id,household_id,username,email,display_name FROM users WHERE email=? COLLATE NOCASE",
+            [email.into()],
+        ))
+        .await?
+    {
+        let user = user_from_row(row)?;
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "UPDATE users SET google_sub=? WHERE id=?",
+            [google_sub.into(), user.id.into()],
+        ))
+        .await?;
+        return Ok(user);
+    }
+    use rand::{Rng, distr::Alphanumeric};
+    let random_password: String = rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+    let password_hash = auth::hash_password(random_password).await?;
+    let user = create_account(db, email, display_name, &password_hash).await?;
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "UPDATE users SET google_sub=? WHERE id=?",
+        [google_sub.into(), user.id.into()],
+    ))
+    .await?;
+    Ok(user)
 }
 
 pub async fn create_oauth_client(
@@ -3818,5 +4077,80 @@ mod tests {
         let entries = list_timeline(&db, 1, pet_id, None, 20).await.unwrap();
         assert_eq!(entries.len(), 1);
         assert!(matches!(&entries[0], TimelineEntry::Weight(weight) if weight.id == weight_id));
+    }
+
+    async fn test_user(db: &DatabaseConnection) -> UserAccount {
+        let hash = auth::hash_password("correct horse battery staple".into())
+            .await
+            .unwrap();
+        create_account(db, "probe@example.com", "Probe", &hash)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn api_token_lifecycle_scoped_and_revocable() {
+        let db = test_db().await;
+        let user = test_user(&db).await;
+        // Wrong prefix never resolves (falls through to other auth).
+        assert!(resolve_api_token(&db, "not-a-token").await.unwrap().is_none());
+        let (id, token) = create_api_token(&db, user.id, user.household_id, "laptop")
+            .await
+            .unwrap();
+        assert!(token.starts_with("phj_"));
+        let resolved = resolve_api_token(&db, &token).await.unwrap().unwrap();
+        assert_eq!(resolved.id, user.id);
+        assert_eq!(resolved.household_id, user.household_id);
+        let listed = list_api_tokens(&db, user.id).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, id);
+        assert_eq!(listed[0].name, "laptop");
+        // Another household cannot revoke it.
+        assert!(!revoke_api_token(&db, user.household_id + 999, user.id, id).await.unwrap());
+        assert!(resolve_api_token(&db, &token).await.unwrap().is_some());
+        // Owner revokes: gone from listings and resolution.
+        assert!(revoke_api_token(&db, user.household_id, user.id, id).await.unwrap());
+        assert!(list_api_tokens(&db, user.id).await.unwrap().is_empty());
+        assert!(resolve_api_token(&db, &token).await.unwrap().is_none());
+        // Double revoke is a no-op, not an error.
+        assert!(!revoke_api_token(&db, user.household_id, user.id, id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn oauth_state_is_single_use_and_expires() {
+        let db = test_db().await;
+        create_oauth_state(&db, "good-state", Some("/app"), 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            consume_oauth_state(&db, "good-state").await.unwrap(),
+            Some("/app".to_owned())
+        );
+        // Replay fails: the row was deleted on first consume.
+        assert!(consume_oauth_state(&db, "good-state").await.unwrap().is_none());
+        assert!(consume_oauth_state(&db, "unknown-state").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn google_link_or_create_prefers_sub_then_email() {
+        let db = test_db().await;
+        let first = find_or_create_google_user(&db, "sub-1", "g@example.com", "Gee")
+            .await
+            .unwrap();
+        // Same sub, different email claim: same user (sub is authoritative).
+        let same = find_or_create_google_user(&db, "sub-1", "other@example.com", "Gee")
+            .await
+            .unwrap();
+        assert_eq!(first.id, same.id);
+        // New sub with the verified email: links to the existing household.
+        let linked = find_or_create_google_user(&db, "sub-2", "g@example.com", "Gee")
+            .await
+            .unwrap();
+        assert_eq!(linked.household_id, first.household_id);
+        // Unknown sub + unknown email: brand-new household.
+        let fresh = find_or_create_google_user(&db, "sub-9", "new@example.com", "New")
+            .await
+            .unwrap();
+        assert_ne!(fresh.household_id, first.household_id);
     }
 }
