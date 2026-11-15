@@ -48,6 +48,9 @@ async fn main() -> anyhow::Result<()> {
     let database = db::connect(&config.database_url).await?;
     db::migrate(&database).await?;
     db::bootstrap_owner(&database, &config.username, &config.password).await?;
+    if let Some(command) = std::env::args().nth(1) {
+        return run_operator_command(&database, &command).await;
+    }
     let agent = Arc::new(agent::CaptureAgent::new(&config));
     let chat = Arc::new(agent::ChatAgent::new(&config));
     let mailer = Arc::new(email::Mailer::from_config(config.smtp.as_ref())?);
@@ -83,6 +86,42 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// Operator commands, run inside the container (`docker exec ... pethealth
+/// <command>`), never over HTTP.
+///
+/// `set-login-password <email>`: create the account if needed and set its
+/// password from the `NEW_PASSWORD` environment variable. For accounts that
+/// cannot receive emailed codes, such as an app-store reviewer's.
+async fn run_operator_command(
+    database: &sea_orm::DatabaseConnection,
+    command: &str,
+) -> anyhow::Result<()> {
+    match command {
+        "set-login-password" => {
+            let email = std::env::args()
+                .nth(2)
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| value.contains('@') && !value.contains(char::is_whitespace))
+                .context("usage: NEW_PASSWORD=... pethealth set-login-password <email>")?;
+            let password = std::env::var("NEW_PASSWORD").unwrap_or_default();
+            if password.chars().count() < 12 || password.chars().count() > 128 {
+                anyhow::bail!("NEW_PASSWORD must be 12 to 128 characters");
+            }
+            let (user, created) = db::find_or_create_email_user(database, &email).await?;
+            let hash = auth::hash_password(password).await?;
+            db::update_password_and_revoke_sessions(database, &user, &hash).await?;
+            println!(
+                "{} account {} (household {}); password set, other sessions signed out",
+                if created { "created" } else { "updated" },
+                user.email.as_deref().unwrap_or(&email),
+                user.household_id
+            );
+            Ok(())
+        }
+        other => anyhow::bail!("unknown command {other:?}; available: set-login-password"),
+    }
 }
 
 async fn shutdown_signal() {
