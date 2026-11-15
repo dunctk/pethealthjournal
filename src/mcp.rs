@@ -804,8 +804,9 @@ fn tool_list() -> Value {
         {"name":"create_vet_share","description":"Create a private, read-only link to one pet's health record for a vet or clinic. The link expires (default 14 days, max 90) and can be revoked. Returns the URL once; give it to the owner to send. Confirm the recipient and duration with the owner first.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"label":{"type":"string","maxLength":120,"description":"Who it is for, e.g. 'Dr Smith, Riverside Vets'."},"days":{"type":"integer","minimum":1,"maximum":90,"default":14},"confirm":{"type":"boolean"}},"required":["pet_id","label","confirm"]}},
         {"name":"list_vet_shares","description":"List vet share links for the household with their status (active, expired, revoked). URLs are not shown again after creation.","inputSchema":{"type":"object","properties":{}},"annotations":{"readOnlyHint":true}},
         {"name":"revoke_vet_share","description":"Revoke a vet share link immediately, by share id from list_vet_shares.","inputSchema":{"type":"object","properties":{"share_id":{"type":"integer"}},"required":["share_id"]},"annotations":{"destructiveHint":true}},
+        {"name":"attach_blood_test_original","description":"Attach the original photo or PDF the owner shared to an already saved blood-test report (e.g. one saved without its file). Get report_id from get_blood_test_history.","inputSchema":{"type":"object","properties":{"report_id":{"type":"integer"},"report_file":{"type":"object","description":"The attached report file.","properties":{"download_url":{"type":"string"},"file_id":{"type":"string"}}}},"required":["report_id","report_file"]},"_meta":{"openai/fileParams":["report_file"]}},
         {"name":"delete_blood_test","description":"Delete one saved blood-test report and all its values, e.g. to correct a mistaken transcription. Only call after the owner explicitly asks.","inputSchema":{"type":"object","properties":{"report_id":{"type":"integer"}},"required":["report_id"]},"annotations":{"destructiveHint":true}},
-        {"name":"upload_blood_test","description":"For clients that can send raw file bytes only: store one PDF or image and import it with server-side Mistral OCR. If you can read the report yourself (e.g. a photo the user attached in chat), use record_blood_test instead.","inputSchema":{"type":"object","properties":{"filename":{"type":"string"},"content_base64":{"type":"string","description":"The PDF or image bytes encoded as base64."}},"required":["filename","content_base64"]}},
+        {"name":"upload_blood_test","description":"NOT for files attached in chat. Only for API clients that hold raw file bytes: stores one PDF or image as base64 and imports it with server-side OCR. If the owner attached a report in the conversation, read it yourself and use record_blood_test with report_file instead.","inputSchema":{"type":"object","properties":{"filename":{"type":"string"},"content_base64":{"type":"string","description":"The PDF or image bytes encoded as base64."}},"required":["filename","content_base64"]}},
         {"name":"import_blood_tests","description":"OCR new PDF and image files from this household's private blood-test folder using Mistral OCR 4.","inputSchema":{"type":"object","properties":{} }},
         {"name":"record_observation","description":"PREFERRED neutral write path: save a general note using the owner's exact words (1-1000 chars). No model is called; the server timestamps it now or by relative minutes_ago. Use this when you (the assistant) have already interpreted the user's request.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"message":{"type":"string","description":"The owner's exact words; preserved verbatim.","minLength":1,"maxLength":1000},"minutes_ago":{"type":"integer","minimum":0,"maximum":525600},"summary":{"type":"string","description":"Short label, max ~280 chars. Defaults to 'Observation recorded'."},"note":{"type":"string","description":"Optional extra detail."}},"required":["pet_id","message"]}},
         {"name":"record_health_event","description":"Legacy free-text capture. May invoke an additional server-side LLM even when the MCP client is ChatGPT or Claude. Prefer specific structured record_* tools or record_observation to avoid duplicate inference.","inputSchema":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}},
@@ -1639,9 +1640,22 @@ async fn call_tool(
                     }
                 }
             };
+            let same_date: Vec<i64> = db::list_lab_reports(&state.db, user.household_id, pet.id)
+                .await
+                .map_err(internal)?
+                .into_iter()
+                .filter(|r| {
+                    r.id != report_id && r.test_date.as_deref() == Some(input.test_date.as_str())
+                })
+                .map(|r| r.id)
+                .collect();
             json!({
                 "report_id": report_id,
                 "original_report": original,
+                "other_reports_same_date": same_date,
+                "duplicate_hint": if same_date.is_empty() { Value::Null } else {
+                    json!("This pet already had a report for this date. Tell the owner; if it is the same report, they may want delete_blood_test on the older one. Do not delete without their explicit request.")
+                },
                 "pet_id": pet.id,
                 "pet_name": pet.name,
                 "test_date": input.test_date,
@@ -1656,6 +1670,28 @@ async fn call_tool(
                 })).collect::<Vec<_>>(),
                 "note": "Saved as transcribed and confirmed by the owner. These are records, not a diagnosis."
             })
+        }
+        "attach_blood_test_original" => {
+            let report_id = integer(&args, "report_id")?;
+            let exists = db::list_lab_report_ids(&state.db, user.household_id)
+                .await
+                .map_err(internal)?
+                .contains(&report_id);
+            if !exists {
+                return Err((
+                    -32602,
+                    "That blood-test report is not in this household.".into(),
+                ));
+            }
+            let url = args
+                .get("report_file")
+                .and_then(|file| file.get("download_url"))
+                .and_then(Value::as_str)
+                .ok_or((-32602, "report_file with a download_url is required; attach the report file to the conversation.".to_owned()))?;
+            attach_original(state, user.household_id, report_id, url)
+                .await
+                .map_err(|error| (-32602, format!("Could not attach the original: {error}")))?;
+            json!({"attached": true, "report_id": report_id})
         }
         "delete_blood_test" => {
             let report_id = integer(&args, "report_id")?;
@@ -2273,6 +2309,7 @@ mod tests {
             "update_pet",
             "delete_pet",
             "delete_weight",
+            "attach_blood_test_original",
             "create_vet_share",
             "list_vet_shares",
             "revoke_vet_share",

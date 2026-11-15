@@ -696,6 +696,22 @@ pub async fn set_lab_report_original(
     Ok(())
 }
 
+/// All lab report ids in a household (for existence checks).
+pub async fn list_lab_report_ids(
+    db: &DatabaseConnection,
+    household_id: i64,
+) -> anyhow::Result<Vec<i64>> {
+    db.query_all(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "SELECT id FROM lab_reports WHERE household_id=?",
+        [household_id.into()],
+    ))
+    .await?
+    .into_iter()
+    .map(|row| row.try_get::<i64>("", "id").map_err(Into::into))
+    .collect()
+}
+
 /// The stored original file for one lab report, household-scoped.
 pub async fn lab_report_original(
     db: &DatabaseConnection,

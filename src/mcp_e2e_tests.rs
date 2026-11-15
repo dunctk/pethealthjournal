@@ -285,6 +285,14 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
             .unwrap()
             .contains("not allowed")
     );
+    let attach = h.err(&owner, "attach_blood_test_original", json!({"report_id":foreign["report_id"],"report_file":{"download_url":"https://evil.blob.core.windows.net/x.pdf"}})).await;
+    assert!(attach.contains("not allowed"), "{attach}");
+    h.err(&stranger, "attach_blood_test_original", json!({"report_id":foreign["report_id"],"report_file":{"download_url":"https://files.oaiusercontent.com/x.pdf"}})).await;
+    let again = h.ok(&owner, "record_blood_test", json!({"pet_id":pet_id,"test_date":"2026-10-15","results":[{"test_name":"ALT/GPT","value":"81","unit":"UI/l"}],"confirm":true})).await;
+    assert_eq!(
+        again["other_reports_same_date"],
+        json!([foreign["report_id"]])
+    );
     let history = h
         .ok(&owner, "get_blood_test_history", json!({"pet_id":pet_id}))
         .await;

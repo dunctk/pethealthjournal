@@ -133,6 +133,8 @@ const ANALYTES: &[Analyte] = &[
         aliases: &[
             "alt",
             "alt (gpt)",
+            "alt/gpt",
+            "gpt/alt",
             "gpt",
             "sgpt",
             "alat",
@@ -148,6 +150,8 @@ const ANALYTES: &[Analyte] = &[
         aliases: &[
             "ast",
             "ast (got)",
+            "ast/got",
+            "got/ast",
             "got",
             "sgot",
             "asat",
@@ -354,8 +358,9 @@ pub fn normalize_unit(unit: &str) -> String {
         .replace("/mm3", "/ul")
         .replace("/mm^3", "/ul");
     match u.as_str() {
-        "k/ul" | "thou/ul" | "10^3/ul" | "10^3/mm^3" => "10^3/ul".into(),
-        "m/ul" | "mil/ul" | "10^6/ul" => "10^6/ul".into(),
+        // Bare "10^3"/"10^6" on cell counts means per µL.
+        "k/ul" | "thou/ul" | "10^3/ul" | "10^3/mm^3" | "10^3" => "10^3/ul".into(),
+        "m/ul" | "mil/ul" | "10^6/ul" | "10^6" => "10^6/ul".into(),
         "g/l(cells)" => "10^9/l".into(),
         "iu/l" | "ui/l" => "iu/l".into(),
         "mg/100ml" => "mg/dl".into(),
@@ -446,6 +451,11 @@ mod tests {
         assert_eq!(normalize_unit("K/µL"), "10^3/ul");
         assert_eq!(normalize_unit("μmol/L"), "umol/l");
         assert_eq!(normalize_unit("mcg/dL"), "ug/dl");
+        assert_eq!(
+            standardize("Plaquetas", Some("10^3"), Some(494.0)).key,
+            "platelets"
+        );
+        assert_eq!(standardize("ALT/GPT", Some("UI/l"), Some(38.0)).key, "alt");
         let wbc = standardize("WBC", Some("K/uL"), Some(8.2));
         assert_eq!(wbc.key, "wbc");
         assert_eq!(wbc.value, Some(8.2));

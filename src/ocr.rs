@@ -194,20 +194,37 @@ fn allowed_file_hosts() -> Vec<String> {
     std::env::var("MCP_FILE_URL_HOSTS")
         .ok()
         .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "oaiusercontent.com,openai.com,chatgpt.com".into())
+        .unwrap_or_else(|| {
+            "oaiusercontent.com,openai.com,chatgpt.com,oai*.blob.core.windows.net".into()
+        })
         .split(',')
         .map(|h| h.trim().trim_start_matches('.').to_ascii_lowercase())
         .filter(|h| !h.is_empty())
         .collect()
 }
 
+/// An entry matches the host exactly or as a parent domain
+/// (`openai.com` matches `files.openai.com`). An entry with one `*` matches
+/// a single DNS label by prefix: `oai*.blob.core.windows.net` matches
+/// `oaisdmntprukwest.blob.core.windows.net` but not `evil.blob.core.windows.net`
+/// or `oai.x.blob.core.windows.net`.
+fn host_matches(host: &str, entry: &str) -> bool {
+    if let Some((prefix, rest)) = entry.split_once('*') {
+        let Some(label) = host.strip_suffix(rest).filter(|_| rest.starts_with('.')) else {
+            return false;
+        };
+        return label.starts_with(prefix)
+            && !label.contains('.')
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    }
+    host == entry || host.ends_with(&format!(".{entry}"))
+}
+
 fn host_allowed(url: &reqwest::Url, allowed: &[String]) -> bool {
     url.scheme() == "https"
         && url.host_str().is_some_and(|host| {
             let host = host.to_ascii_lowercase();
-            allowed
-                .iter()
-                .any(|a| host == *a || host.ends_with(&format!(".{a}")))
+            allowed.iter().any(|entry| host_matches(&host, entry))
         })
 }
 
@@ -542,6 +559,24 @@ pub(crate) mod tests {
             google_client_secret: None,
         }
     }
+    #[test]
+    fn file_host_allowlist_is_narrow() {
+        let allowed: Vec<String> = ["oaiusercontent.com", "oai*.blob.core.windows.net"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let ok = |u: &str| host_allowed(&reqwest::Url::parse(u).unwrap(), &allowed);
+        assert!(ok(
+            "https://oaisdmntprukwest.blob.core.windows.net/f/x?sig=1"
+        ));
+        assert!(ok("https://files.oaiusercontent.com/x"));
+        assert!(!ok("http://oaisdmntprukwest.blob.core.windows.net/x"));
+        assert!(!ok("https://evil.blob.core.windows.net/x"));
+        assert!(!ok("https://oai.evil.blob.core.windows.net/x"));
+        assert!(!ok("https://oaiblob.core.windows.net.evil.com/x"));
+        assert!(!ok("https://example.com/x"));
+    }
+
     #[test]
     fn parses_english_and_spanish_table_rows() {
         let results = parse_results(
