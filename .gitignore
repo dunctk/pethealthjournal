@@ -10,3 +10,7 @@
 
 # Private business planning belongs in dunctk/pethealthtracker-business.
 /BUSINESS_MODEL.md
+
+# Blood-test eval answer keys contain real health data; never commit.
+evals/blood-tests/cases/*
+!evals/blood-tests/cases/example.json

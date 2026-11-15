@@ -55,7 +55,13 @@ pub async fn endpoint(
             if request.id.is_none() {
                 return StatusCode::NO_CONTENT.into_response();
             }
-            handle(&state, &user, request).await
+            let origin = state
+                .config
+                .app_base_url
+                .clone()
+                .map(|base| base.trim_end_matches('/').to_owned())
+                .unwrap_or_else(|| public_origin(&state, &headers));
+            handle(&state, &user, request, &origin).await
         }
         Err((status, message)) => {
             return (
@@ -699,7 +705,12 @@ fn negotiate_protocol_version(asked: &str) -> &'static str {
         .unwrap_or(SUPPORTED_PROTOCOL_VERSIONS[0])
 }
 
-async fn handle(state: &AppState, user: &UserAccount, request: RpcRequest) -> RpcResponse {
+async fn handle(
+    state: &AppState,
+    user: &UserAccount,
+    request: RpcRequest,
+    origin: &str,
+) -> RpcResponse {
     let id = request.id.clone();
     let result = match request.method.as_str() {
         "initialize" => {
@@ -721,7 +732,35 @@ async fn handle(state: &AppState, user: &UserAccount, request: RpcRequest) -> Rp
         "notifications/initialized" => Ok(Value::Null),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(tool_list()),
-        "tools/call" => call_tool(state, user, request.params).await,
+        "tools/call" => {
+            let tool = request
+                .params
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .chars()
+                .take(64)
+                .collect::<String>();
+            let started = std::time::Instant::now();
+            let result = call_tool(state, user, request.params, origin).await;
+            let elapsed = started.elapsed().as_millis() as i64;
+            let error_code = result.as_ref().err().map(|(code, _)| *code);
+            tracing::info!(
+                target: "pethealth::mcp",
+                tool = %tool,
+                ok = error_code.is_none(),
+                error_code,
+                duration_ms = elapsed,
+                household_id = user.household_id,
+                "mcp tool call"
+            );
+            if let Err(error) =
+                db::log_tool_call(&state.db, user.household_id, &tool, error_code, elapsed).await
+            {
+                tracing::warn!(%error, "failed to log mcp tool call");
+            }
+            result
+        }
         _ => Err((-32601, format!("Unknown method: {}", request.method))),
     };
     match result {
@@ -748,7 +787,7 @@ fn tool_list() -> Value {
         {"name":"get_medication_plan","description":"Read a pet's current prescriptions and dose-adherence history. This is a record, not a dosing recommendation.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
         {"name":"get_health_context","description":"Read practical care context for a health concept. This is not a diagnosis.","inputSchema":{"type":"object","properties":{"concept":{"type":"string"}},"required":["concept"]},"annotations":{"readOnlyHint":true}},
         {"name":"get_weight_history","description":"Read weight measurements over time for one pet, newest first. Use since/until (YYYY-MM-DD) to bound the range.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":50},"since":{"type":"string","description":"Earliest date to include, YYYY-MM-DD."},"until":{"type":"string","description":"Latest date to include, YYYY-MM-DD."}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
-        {"name":"get_blood_test_history","description":"Read imported blood-test values for one pet, newest first. Original reports remain stored for review. Filter by date with since/until (YYYY-MM-DD).","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":25},"since":{"type":"string","description":"Earliest test date to include, YYYY-MM-DD."},"until":{"type":"string","description":"Latest test date to include, YYYY-MM-DD."}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
+        {"name":"get_blood_test_history","description":"Read blood-test values for one pet, newest first. Each result keeps the printed name/value/unit; recognised analytes also include a 'standard' object (common name and value converted to one unit) so results from different labs can be compared. Original reports remain stored for review. Filter by date with since/until (YYYY-MM-DD).","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":25},"since":{"type":"string","description":"Earliest test date to include, YYYY-MM-DD."},"until":{"type":"string","description":"Latest test date to include, YYYY-MM-DD."}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
         {"name":"get_health_insights","description":"Read deterministic, LLM-free health findings for one pet (weight trends, symptom frequency, adherence gaps, lab deltas), newest first. Each finding cites its source records. These describe measured changes only, never a diagnosis.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":25},"include_dismissed":{"type":"boolean","default":false}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
         {"name":"add_pet","description":"Add a pet to the signed-in household.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"species":{"type":"string"},"breed":{"type":"string"},"weight_kg":{"type":"number"}},"required":["name","species"]}},
         {"name":"record_weight","description":"Save a weight measurement for a pet.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"weight_kg":{"type":"number"},"measured_at":{"type":"string","description":"YYYY-MM-DD"},"note":{"type":"string"}},"required":["pet_id","weight_kg","measured_at"]}},
@@ -758,7 +797,13 @@ fn tool_list() -> Value {
         {"name":"update_prescription","description":"Change an EXISTING prescription: stop it, pause it, resume a paused one, or change its dose/frequency. Use this instead of record_prescription when the owner says the vet stopped, paused, or adjusted a medication. Get prescription_id from get_medication_plan. History is kept: a dose change stops the old regimen and creates a new active one. Restate the change to the owner and get their explicit approval before calling with confirm:true.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"prescription_id":{"type":"integer"},"action":{"type":"string","enum":["stop","pause","resume","change_dose"]},"effective_days_ago":{"type":"integer","minimum":0,"maximum":3650,"default":0,"description":"For stop/change_dose: how many days ago it took effect. The server computes the date."},"dose_value":{"type":"number","exclusiveMinimum":0},"dose_unit":{"type":"string","maxLength":40},"frequency":{"type":"string","maxLength":120},"concentration_value":{"type":"number","exclusiveMinimum":0},"concentration_unit":{"type":"string","maxLength":40},"instructions":{"type":"string","maxLength":1000},"message":{"type":"string","minLength":1,"maxLength":1000,"description":"The owner's exact words; preserved on the timeline."},"confirm":{"type":"boolean","description":"Must be true, only after the owner explicitly approved this change."}},"required":["pet_id","prescription_id","action","message","confirm"]},"annotations":{"destructiveHint":true}},
         {"name":"undo_medication_entry","description":"Delete one mistaken medication record: a dose logged with record_medication (entry_type 'dose', id = medication_id) or an adherence record from record_medication_adherence (entry_type 'adherence', id = adherence_id). Prescriptions are changed with update_prescription instead. Only call when the owner asks to remove that entry.","inputSchema":{"type":"object","properties":{"entry_type":{"type":"string","enum":["dose","adherence"]},"id":{"type":"integer"}},"required":["entry_type","id"]},"annotations":{"destructiveHint":true}},
         {"name":"record_medication_adherence","description":"Record whether a scheduled prescription dose was given, partial, missed, or unknown. Use days_ago for a past calendar day; the server chooses the date.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"prescription_id":{"type":"integer"},"days_ago":{"type":"integer","minimum":0,"maximum":36500},"actual_dose_value":{"type":"number"},"actual_dose_unit":{"type":"string"},"status":{"type":"string","enum":["given","partial","missed","unknown"]},"reason":{"type":"string"},"message":{"type":"string"}},"required":["pet_id","prescription_id","status"]}},
-        {"name":"record_blood_test","description":"Save blood-test (lab) results for a pet, e.g. from a photo or PDF of a vet lab report the owner shared with you. You read the report yourself; no server-side OCR runs. WORKFLOW: 1) call list_pets to get pet_id; 2) transcribe EVERY analyte exactly as printed (name, value, unit, reference range, H/L flag) plus the report's collection/test date; 3) show the owner the extracted table and ask them to confirm or correct it; 4) only then call this tool with confirm:true. Do not convert units, round, infer missing values or interpret results. If the photo is unreadable or the date is missing, ask the owner instead of guessing.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"test_date":{"type":"string","description":"Date the sample was collected/tested as printed on the report, YYYY-MM-DD. Not today's date unless the report says so."},"lab_name":{"type":"string","maxLength":120,"description":"Clinic or laboratory name, if printed."},"panel":{"type":"string","maxLength":120,"description":"Panel/report title if printed, e.g. 'Biochemistry', 'CBC', 'SDMA'."},"transcription":{"type":"string","maxLength":20000,"description":"Verbatim text of the report as you read it, kept as the source record."},"results":{"type":"array","minItems":1,"maxItems":200,"items":{"type":"object","properties":{"test_name":{"type":"string","maxLength":120,"description":"Analyte exactly as printed, e.g. 'CREA', 'ALT', 'SDMA'."},"value":{"type":"string","maxLength":60,"description":"Value exactly as printed, e.g. '1.8', '<0.1', '>500', 'Positive'."},"unit":{"type":"string","maxLength":40},"reference_range":{"type":"string","maxLength":80,"description":"As printed, e.g. '0.8 - 2.4'."},"flag":{"type":"string","enum":["high","low","normal","abnormal"],"description":"Only if the report marks it (H/L/*). Omit otherwise."}},"required":["test_name","value"]}},"confirm":{"type":"boolean","description":"Must be true, and only after the owner reviewed and approved the extracted values."}},"required":["pet_id","test_date","results","confirm"]}},
+        {"name":"record_blood_test","description":"Save blood-test (lab) results for a pet, e.g. from a photo or PDF of a vet lab report the owner shared with you. You read the report yourself; no server-side OCR runs. WORKFLOW: 1) call list_pets to get pet_id; 2) transcribe EVERY analyte exactly as printed (name, value, unit, reference range, H/L flag) plus the report's collection/test date; 3) show the owner the extracted table and ask them to confirm or correct it; 4) only then call this tool with confirm:true. Do not convert units, round, infer missing values or interpret results. If the photo is unreadable or the date is missing, ask the owner instead of guessing.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"test_date":{"type":"string","description":"Date the sample was collected/tested as printed on the report, YYYY-MM-DD. Not today's date unless the report says so."},"lab_name":{"type":"string","maxLength":120,"description":"Clinic or laboratory name, if printed."},"panel":{"type":"string","maxLength":120,"description":"Panel/report title if printed, e.g. 'Biochemistry', 'CBC', 'SDMA'."},"transcription":{"type":"string","maxLength":20000,"description":"Verbatim text of the report as you read it, kept as the source record."},"results":{"type":"array","minItems":1,"maxItems":200,"items":{"type":"object","properties":{"test_name":{"type":"string","maxLength":120,"description":"Analyte exactly as printed, e.g. 'CREA', 'ALT', 'SDMA'."},"value":{"type":"string","maxLength":60,"description":"Value exactly as printed, e.g. '1.8', '<0.1', '>500', 'Positive'."},"unit":{"type":"string","maxLength":40},"reference_range":{"type":"string","maxLength":80,"description":"As printed, e.g. '0.8 - 2.4'."},"flag":{"type":"string","enum":["high","low","normal","abnormal"],"description":"Only if the report marks it (H/L/*). Omit otherwise."}},"required":["test_name","value"]}},"confirm":{"type":"boolean","description":"Must be true, and only after the owner reviewed and approved the extracted values."},"report_file":{"type":"object","description":"The photo or PDF of the report the owner attached, so the original is kept with the record.","properties":{"download_url":{"type":"string"},"file_id":{"type":"string"}}}},"required":["pet_id","test_date","results","confirm"]},"_meta":{"openai/fileParams":["report_file"]}},
+        {"name":"update_pet","description":"Edit a pet's profile: name, species, breed or date of birth. Only the fields given change; pass an empty string to clear breed or date_of_birth. Confirm the change with the owner first.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"name":{"type":"string","maxLength":80},"species":{"type":"string","maxLength":60},"breed":{"type":"string","maxLength":120},"date_of_birth":{"type":"string","description":"YYYY-MM-DD, or empty to clear."}},"required":["pet_id"]}},
+        {"name":"delete_pet","description":"PERMANENTLY delete a pet and ALL of its records (timeline, weights, medications, blood tests, photos, vet share links). Cannot be undone. Only when the owner explicitly asks; state what will be lost and get approval. confirm_name must exactly equal the pet's name.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"confirm_name":{"type":"string","description":"The pet's exact name, as typed confirmation."},"confirm":{"type":"boolean"}},"required":["pet_id","confirm_name","confirm"]},"annotations":{"destructiveHint":true}},
+        {"name":"delete_weight","description":"Delete one mistaken weight entry. Get weight ids from get_weight_history. Only when the owner asks.","inputSchema":{"type":"object","properties":{"weight_id":{"type":"integer"}},"required":["weight_id"]},"annotations":{"destructiveHint":true}},
+        {"name":"create_vet_share","description":"Create a private, read-only link to one pet's health record for a vet or clinic. The link expires (default 14 days, max 90) and can be revoked. Returns the URL once; give it to the owner to send. Confirm the recipient and duration with the owner first.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"label":{"type":"string","maxLength":120,"description":"Who it is for, e.g. 'Dr Smith, Riverside Vets'."},"days":{"type":"integer","minimum":1,"maximum":90,"default":14},"confirm":{"type":"boolean"}},"required":["pet_id","label","confirm"]}},
+        {"name":"list_vet_shares","description":"List vet share links for the household with their status (active, expired, revoked). URLs are not shown again after creation.","inputSchema":{"type":"object","properties":{}},"annotations":{"readOnlyHint":true}},
+        {"name":"revoke_vet_share","description":"Revoke a vet share link immediately, by share id from list_vet_shares.","inputSchema":{"type":"object","properties":{"share_id":{"type":"integer"}},"required":["share_id"]},"annotations":{"destructiveHint":true}},
         {"name":"delete_blood_test","description":"Delete one saved blood-test report and all its values, e.g. to correct a mistaken transcription. Only call after the owner explicitly asks.","inputSchema":{"type":"object","properties":{"report_id":{"type":"integer"}},"required":["report_id"]},"annotations":{"destructiveHint":true}},
         {"name":"upload_blood_test","description":"For clients that can send raw file bytes only: store one PDF or image and import it with server-side Mistral OCR. If you can read the report yourself (e.g. a photo the user attached in chat), use record_blood_test instead.","inputSchema":{"type":"object","properties":{"filename":{"type":"string"},"content_base64":{"type":"string","description":"The PDF or image bytes encoded as base64."}},"required":["filename","content_base64"]}},
         {"name":"import_blood_tests","description":"OCR new PDF and image files from this household's private blood-test folder using Mistral OCR 4.","inputSchema":{"type":"object","properties":{} }},
@@ -772,6 +817,7 @@ async fn call_tool(
     state: &AppState,
     user: &UserAccount,
     params: Value,
+    origin: &str,
 ) -> Result<Value, (i32, String)> {
     let name = params
         .get("name")
@@ -958,7 +1004,34 @@ async fn call_tool(
                 });
             }
             reports.truncate(limit);
-            serde_json::to_value(reports).map_err(internal)?
+            let mut value = serde_json::to_value(&reports).map_err(internal)?;
+            // Add a standardized view next to each printed result so clients
+            // can line up the same analyte across labs and unit systems.
+            if let Some(items) = value.as_array_mut() {
+                for (report_json, report) in items.iter_mut().zip(&reports) {
+                    let Some(results) =
+                        report_json.get_mut("results").and_then(Value::as_array_mut)
+                    else {
+                        continue;
+                    };
+                    for (result_json, result) in results.iter_mut().zip(&report.results) {
+                        let standard = crate::analytes::standardize(
+                            &result.test_name,
+                            result.unit.as_deref(),
+                            result.value_numeric,
+                        );
+                        if standard.recognized {
+                            result_json["standard"] = json!({
+                                "analyte": standard.key,
+                                "label": standard.label,
+                                "value": standard.value,
+                                "unit": standard.unit,
+                            });
+                        }
+                    }
+                }
+            }
+            value
         }
         "get_health_insights" => {
             let pet_id = integer(&args, "pet_id")?;
@@ -1275,6 +1348,181 @@ async fn call_tool(
             .map_err(internal)?;
             serde_json::to_value(imported.iter().map(|item| json!({"filename":item.filename,"report_id":item.report_id,"message":item.message})).collect::<Vec<_>>()).map_err(internal)?
         }
+        "update_pet" => {
+            let pet_id = integer(&args, "pet_id")?;
+            let name = bounded_text(args.get("name"), "name", 80).map_err(|m| (-32602, m))?;
+            let species =
+                bounded_text(args.get("species"), "species", 60).map_err(|m| (-32602, m))?;
+            // Empty string clears these; absent leaves them unchanged.
+            let breed = match args.get("breed") {
+                Some(Value::String(text)) if text.trim().is_empty() => Some(String::new()),
+                other => bounded_text(other, "breed", 120).map_err(|m| (-32602, m))?,
+            };
+            let date_of_birth = match args.get("date_of_birth") {
+                Some(Value::String(text)) if text.trim().is_empty() => Some(String::new()),
+                other => {
+                    let text = bounded_text(other, "date_of_birth", 10).map_err(|m| (-32602, m))?;
+                    if let Some(text) = &text {
+                        let date =
+                            chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").map_err(|_| {
+                                (-32602, "date_of_birth must be YYYY-MM-DD.".to_owned())
+                            })?;
+                        if date > Utc::now().date_naive() {
+                            return Err((-32602, "date_of_birth cannot be in the future.".into()));
+                        }
+                    }
+                    text
+                }
+            };
+            if name.is_none() && species.is_none() && breed.is_none() && date_of_birth.is_none() {
+                return Err((-32602, "Give at least one field to change.".into()));
+            }
+            let updated = db::update_pet(
+                &state.db,
+                user.household_id,
+                &user.audit_actor(),
+                pet_id,
+                name.as_deref(),
+                species.as_deref(),
+                breed.as_deref(),
+                date_of_birth.as_deref(),
+            )
+            .await
+            .map_err(|error| {
+                if error.to_string().contains("UNIQUE") {
+                    (
+                        -32602,
+                        "Another pet in this household already has that name.".to_owned(),
+                    )
+                } else {
+                    internal(error)
+                }
+            })?;
+            if !updated {
+                return Err((-32602, "That pet is not in this household.".into()));
+            }
+            let pet = db::get_pet(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?;
+            json!({"updated": true, "pet": pet})
+        }
+        "delete_pet" => {
+            let pet_id = integer(&args, "pet_id")?;
+            let pet = db::get_pet(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?
+                .ok_or((-32602, "That pet is not in this household.".into()))?;
+            let typed = string(&args, "confirm_name")?;
+            if args.get("confirm").and_then(Value::as_bool) != Some(true)
+                || typed.trim() != pet.name
+            {
+                return Err((
+                    -32602,
+                    format!(
+                        "Deleting {} permanently removes all of its records. Get the owner's explicit approval, then call with confirm:true and confirm_name exactly \"{}\".",
+                        pet.name, pet.name
+                    ),
+                ));
+            }
+            let deleted = db::delete_pet(&state.db, user.household_id, &user.audit_actor(), pet.id)
+                .await
+                .map_err(internal)?
+                .ok_or((-32602, "That pet is not in this household.".into()))?;
+            // Remove stored files after the records are gone: photos, and lab
+            // source files so the folder importer cannot re-import them.
+            let _ = tokio::fs::remove_dir_all(crate::photos::pet_directory(
+                &state.config,
+                user.household_id,
+                pet.id,
+            ))
+            .await;
+            for file in &deleted.lab_source_files {
+                if let Ok(path) = crate::ocr::household_file(&state.config, user.household_id, file)
+                {
+                    let _ = tokio::fs::remove_file(path).await;
+                }
+            }
+            json!({"deleted": true, "pet_id": deleted.pet_id, "name": deleted.name, "removed": deleted.removed})
+        }
+        "delete_weight" => {
+            let weight_id = integer(&args, "weight_id")?;
+            let removed =
+                db::delete_weight(&state.db, user.household_id, &user.audit_actor(), weight_id)
+                    .await
+                    .map_err(internal)?
+                    .ok_or((-32602, "That weight entry is not in this household.".into()))?;
+            json!({"deleted": true, "removed": removed})
+        }
+        "create_vet_share" => {
+            let pet_id = integer(&args, "pet_id")?;
+            let pet = db::get_pet(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?
+                .ok_or((-32602, "That pet is not in this household.".into()))?;
+            if args.get("confirm").and_then(Value::as_bool) != Some(true) {
+                return Err((
+                    -32602,
+                    "Confirm who the link is for and how long it should last with the owner, then call again with confirm:true.".into(),
+                ));
+            }
+            let label = bounded_text(args.get("label"), "label", 120)
+                .map_err(|m| (-32602, m))?
+                .ok_or((
+                    -32602,
+                    "label (who the link is for) is required.".to_owned(),
+                ))?;
+            let days = args.get("days").and_then(Value::as_i64).unwrap_or(14);
+            if !(1..=90).contains(&days) {
+                return Err((-32602, "days must be 1 to 90.".into()));
+            }
+            let share = db::create_share(
+                &state.db,
+                user.household_id,
+                &user.audit_actor(),
+                pet.id,
+                &label,
+                days,
+            )
+            .await
+            .map_err(internal)?;
+            let token = share.token.clone().unwrap_or_default();
+            json!({
+                "share_id": share.id,
+                "pet": share.pet_name,
+                "label": share.label,
+                "url": format!("{origin}/share/{token}"),
+                "expires_at": share.expires_at,
+                "note": "Read-only. This URL is shown only once. Revoke any time with revoke_vet_share."
+            })
+        }
+        "list_vet_shares" => {
+            let shares = db::list_shares(&state.db, user.household_id)
+                .await
+                .map_err(internal)?;
+            json!({"shares": shares.into_iter().map(|share| json!({
+                "share_id": share.id,
+                "pet": share.pet_name,
+                "label": share.label,
+                "status": share.status,
+                "expires_at": share.expires_at,
+                "revoked_at": share.revoked_at,
+            })).collect::<Vec<_>>()})
+        }
+        "revoke_vet_share" => {
+            let share_id = integer(&args, "share_id")?;
+            let revoked =
+                db::revoke_share(&state.db, user.household_id, &user.audit_actor(), share_id)
+                    .await
+                    .map_err(internal)?;
+            if !revoked {
+                return Err((
+                    -32602,
+                    "No active share with that id in this household (it may already be revoked)."
+                        .into(),
+                ));
+            }
+            json!({"revoked": true, "share_id": share_id})
+        }
         "update_prescription" => {
             let pet_id = integer(&args, "pet_id")?;
             let pet = db::get_pet(&state.db, user.household_id, pet_id)
@@ -1373,8 +1621,27 @@ async fn call_tool(
             )
             .await
             .map_err(internal)?;
+            // Keep the original report when the client attached it. Saving
+            // the values never depends on this succeeding.
+            let original = match args
+                .get("report_file")
+                .and_then(|file| file.get("download_url"))
+                .and_then(Value::as_str)
+            {
+                None => json!({"attached": false, "reason": "no file was provided"}),
+                Some(url) => {
+                    match attach_original(state, user.household_id, report_id, url).await {
+                        Ok(()) => json!({"attached": true}),
+                        Err(error) => {
+                            tracing::warn!(%error, report_id, "could not attach original blood-test file");
+                            json!({"attached": false, "reason": error.to_string()})
+                        }
+                    }
+                }
+            };
             json!({
                 "report_id": report_id,
+                "original_report": original,
                 "pet_id": pet.id,
                 "pet_name": pet.name,
                 "test_date": input.test_date,
@@ -1589,6 +1856,19 @@ fn parse_prescription_change(
         message,
         change,
     })
+}
+
+async fn attach_original(
+    state: &AppState,
+    household_id: i64,
+    report_id: i64,
+    download_url: &str,
+) -> anyhow::Result<()> {
+    let (bytes, extension) = crate::ocr::fetch_client_file(download_url).await?;
+    let relative =
+        crate::ocr::store_original(&state.config, household_id, report_id, &bytes, extension)
+            .await?;
+    db::set_lab_report_original(&state.db, household_id, report_id, &relative).await
 }
 
 /// A validated blood-test transcription supplied by an MCP client.
@@ -1990,6 +2270,12 @@ mod tests {
             "delete_blood_test",
             "update_prescription",
             "undo_medication_entry",
+            "update_pet",
+            "delete_pet",
+            "delete_weight",
+            "create_vet_share",
+            "list_vet_shares",
+            "revoke_vet_share",
         ] {
             assert!(names.contains(&required), "missing tool: {required}");
         }

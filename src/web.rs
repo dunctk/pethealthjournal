@@ -43,6 +43,7 @@ pub fn router(state: AppState) -> Router {
         .route("/blood-tests/import", post(import_blood_tests))
         .route("/photos/upload", post(upload_photo))
         .route("/photos/{id}/image", get(photo_image))
+        .route("/blood-tests/{id}/original", get(blood_test_original))
         .route("/photos/compare", post(compare_photos))
         .route("/agent/capture", post(capture))
         .route("/agent/chat", post(agent_chat))
@@ -71,6 +72,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(home_page))
         .route("/healthz", get(healthz))
+        .route("/version", get(version))
         .route("/favicon.ico", get(favicon))
         .route("/static/app.css", get(css))
         .route("/static/app.js", get(js))
@@ -1483,6 +1485,30 @@ async fn photo_image(
     Ok(response)
 }
 
+async fn blood_test_original(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    Path(id): Path<i64>,
+) -> Result<Response, AppError> {
+    let relative = db::lab_report_original(&state.db, user.household_id, id)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    let path = crate::ocr::household_file(&state.config, user.household_id, &relative)?;
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|_| AppError::not_found())?;
+    let mime = crate::ocr::mime_for_extension(&path).unwrap_or("application/octet-stream");
+    let mut response = bytes.into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=86400"),
+    );
+    Ok(response)
+}
+
 #[derive(Deserialize)]
 struct PhotoCompareForm {
     pet_id: i64,
@@ -2789,6 +2815,15 @@ async fn logo() -> impl IntoResponse {
 }
 async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, "ok")
+}
+
+/// Build identity for deploy verification. `GIT_SHA` is baked in at compile
+/// time by the Docker build; local builds report "dev".
+async fn version() -> impl IntoResponse {
+    axum::Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "commit": option_env!("GIT_SHA").filter(|s| !s.is_empty()).unwrap_or("dev"),
+    }))
 }
 async fn favicon() -> impl IntoResponse {
     // Shared brand mark (static/logo.svg, mirrored from the favicon).

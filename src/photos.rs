@@ -248,7 +248,7 @@ fn extension_for(mime_type: &str) -> anyhow::Result<&'static str> {
     }
 }
 
-fn pet_directory(config: &Config, household_id: i64, pet_id: i64) -> PathBuf {
+pub fn pet_directory(config: &Config, household_id: i64, pet_id: i64) -> PathBuf {
     Path::new(&config.pet_photos_dir)
         .join(household_id.to_string())
         .join(pet_id.to_string())

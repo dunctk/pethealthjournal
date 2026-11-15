@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 mod agent;
+mod analytes;
 mod auth;
 mod billing;
 mod config;
@@ -8,6 +9,8 @@ mod domain;
 mod entitlements;
 mod insights;
 mod mcp;
+#[cfg(test)]
+mod mcp_e2e_tests;
 mod ocr;
 mod photos;
 mod web;

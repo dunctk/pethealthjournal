@@ -16,7 +16,7 @@ use serde::Serialize;
 
 /// Version every persisted finding carries. Bump when a calculation changes
 /// so old rows can be distinguished from recomputed ones.
-pub const INSIGHTS_RULE_VERSION: &str = "v1";
+pub const INSIGHTS_RULE_VERSION: &str = "v2";
 
 /// A computed, reviewable finding. Returned by [`compute_insights`] and
 /// persisted with provenance for the web UI and `get_health_insights`.
@@ -485,71 +485,100 @@ fn lab_deltas(
     labs: &[LabPoint],
 ) -> Vec<HealthFinding> {
     use std::collections::BTreeMap;
-    let mut by_test: BTreeMap<(String, String), Vec<&LabPoint>> = BTreeMap::new();
+    // Group by standardized analyte (aliases like CREA/Creatinine/Creatinina
+    // merge) and compare values converted to one canonical unit. Unknown
+    // analytes or units stay keyed by printed name + unit, never merged.
+    struct Std<'a> {
+        point: &'a LabPoint,
+        label: String,
+        unit: Option<String>,
+        value: f64,
+    }
+    let mut by_test: BTreeMap<String, Vec<Std<'_>>> = BTreeMap::new();
     for l in labs {
         if !l.value_numeric.is_finite() {
             continue;
         }
-        let unit = l.unit.clone().unwrap_or_default().to_lowercase();
-        by_test
-            .entry((l.test_name.to_lowercase(), unit))
-            .or_default()
-            .push(l);
+        let standard =
+            crate::analytes::standardize(&l.test_name, l.unit.as_deref(), Some(l.value_numeric));
+        let Some(value) = standard.value.filter(|v| v.is_finite()) else {
+            continue;
+        };
+        by_test.entry(standard.key).or_default().push(Std {
+            point: l,
+            label: standard.label,
+            unit: standard.unit,
+            value,
+        });
     }
     let mut out = Vec::new();
-    for ((test, unit), mut rows) in by_test {
+    for (key, mut rows) in by_test {
         rows.sort_by(|a, b| {
-            b.test_date
-                .cmp(&a.test_date)
-                .then(b.imported_at.cmp(&a.imported_at))
+            b.point
+                .test_date
+                .cmp(&a.point.test_date)
+                .then(b.point.imported_at.cmp(&a.point.imported_at))
         });
         if rows.len() < 2 {
             continue;
         }
-        let latest = rows[0];
-        let previous = rows[1];
-        if latest.value_numeric == previous.value_numeric {
+        let latest = &rows[0];
+        let previous = &rows[1];
+        if latest.value == previous.value {
             continue;
         }
-        let abs = latest.value_numeric - previous.value_numeric;
-        let pct = if previous.value_numeric != 0.0 {
-            abs / previous.value_numeric.abs() * 100.0
+        let abs = latest.value - previous.value;
+        let pct = if previous.value != 0.0 {
+            abs / previous.value.abs() * 100.0
         } else {
             0.0
         };
-        let unit_label = if unit.is_empty() {
-            String::new()
-        } else {
-            format!(" {}", latest.unit.clone().unwrap_or_default())
+        let unit_label = latest
+            .unit
+            .as_deref()
+            .filter(|u| !u.is_empty())
+            .map(|u| format!(" {u}"))
+            .unwrap_or_default();
+        let converted = latest.point.unit != previous.point.unit
+            || latest.point.test_name != previous.point.test_name;
+        let printed = |row: &Std<'_>| {
+            format!(
+                "{} {}{}",
+                row.point.test_name,
+                row.point.value_numeric,
+                row.point
+                    .unit
+                    .as_deref()
+                    .map(|u| format!(" {u}"))
+                    .unwrap_or_default()
+            )
         };
         out.push(HealthFinding {
             household_id,
             pet_id,
             pet_name: pet_name.to_owned(),
             finding_type: "lab_delta".into(),
-            period_start: previous.test_date.clone(),
-            period_end: latest.test_date.clone(),
+            period_start: previous.point.test_date.clone(),
+            period_end: latest.point.test_date.clone(),
             summary: format!(
                 "{pet_name}'s {} changed from {} to {}{unit_label} ({:+.1}%).",
-                latest.test_name, previous.value_numeric, latest.value_numeric, pct
+                latest.label, previous.value, latest.value, pct
             ),
             detail: format!(
-                "Latest {} on {} vs {} on {}. Same test name and compatible units required; unrelated tests are never compared. This is a numeric change, not a clinical interpretation.",
-                latest.test_name,
-                latest.test_date.clone().unwrap_or_else(|| "undated report".into()),
-                previous.value_numeric,
-                previous.test_date.clone().unwrap_or_else(|| "undated report".into()),
+                "Latest {} on {} vs {} on {}.{} Results are matched by standardized analyte and compared in one unit; unrelated tests or unconvertible units are never compared. This is a numeric change, not a clinical interpretation.",
+                printed(latest),
+                latest.point.test_date.clone().unwrap_or_else(|| "undated report".into()),
+                printed(previous),
+                previous.point.test_date.clone().unwrap_or_else(|| "undated report".into()),
+                if converted { " Values were converted to a common unit for comparison." } else { "" },
             ),
             rule_version: INSIGHTS_RULE_VERSION.into(),
             source_ids: vec![
-                format!("lab:{}", latest.report_id),
-                format!("lab:{}", previous.report_id),
+                format!("lab:{}", latest.point.report_id),
+                format!("lab:{}", previous.point.report_id),
             ],
-            dedupe_key: format!(
-                "lab_delta:{pet_id}:{}:{}:{}",
-                test, unit, latest.report_id
-            ),
-            uncertainty: "Lab values vary by assay, handling, and timing. Reference ranges and flags are in the underlying reports; this summary does not interpret them.".into(),
+            dedupe_key: format!("lab_delta:{pet_id}:{key}:{}", latest.point.report_id),
+            uncertainty: "Lab values vary by assay, handling, and timing, and labs use different reference ranges. Reference ranges and flags are in the underlying reports; this summary does not interpret them.".into(),
             status: "open".into(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -845,38 +874,45 @@ mod tests {
         assert!(adherence_gaps(1, 7, "Velcro", &rows).is_empty());
     }
 
+    fn lab(report_id: i64, name: &str, value: f64, unit: &str, date: &str, days: i64) -> LabPoint {
+        LabPoint {
+            report_id,
+            test_name: name.into(),
+            value_numeric: value,
+            unit: Some(unit.into()),
+            test_date: Some(date.into()),
+            imported_at: t(days),
+        }
+    }
+
     #[test]
-    fn lab_deltas_require_matching_test_and_unit() {
+    fn lab_deltas_match_aliases_and_convert_units() {
+        // Same analyte from two labs: US mg/dL then EU µmol/L under another name.
         let labs = vec![
-            LabPoint {
-                report_id: 2,
-                test_name: "Creatinine".into(),
-                value_numeric: 2.2,
-                unit: Some("mg/dL".into()),
-                test_date: Some("2026-10-01".into()),
-                imported_at: t(5),
-            },
-            LabPoint {
-                report_id: 1,
-                test_name: "Creatinine".into(),
-                value_numeric: 2.0,
-                unit: Some("mg/dL".into()),
-                test_date: Some("2026-09-01".into()),
-                imported_at: t(40),
-            },
-            LabPoint {
-                report_id: 3,
-                test_name: "Creatinine".into(),
-                value_numeric: 180.0,
-                unit: Some("umol/L".into()),
-                test_date: Some("2026-10-01".into()),
-                imported_at: t(5),
-            },
+            lab(2, "Creatinina", 194.5, "µmol/L", "2026-10-01", 5),
+            lab(1, "CREA", 2.0, "mg/dL", "2026-09-01", 40),
         ];
         let out = lab_deltas(1, 7, "Velcro", &labs);
         assert_eq!(out.len(), 1);
-        assert!(out[0].summary.contains("Creatinine"));
+        assert!(
+            out[0]
+                .summary
+                .contains("Creatinine changed from 176.8 to 194.5 µmol/L")
+        );
+        assert!(out[0].detail.contains("converted to a common unit"));
+        assert!(out[0].detail.contains("CREA 2 mg/dL"));
         assert!(out[0].detail.contains("not a clinical interpretation"));
         let _ = Utc.timestamp_opt(0, 0);
+    }
+
+    #[test]
+    fn lab_deltas_never_compare_unconvertible_units_or_different_tests() {
+        let labs = vec![
+            lab(2, "Creatinine", 0.2, "mmol/L", "2026-10-01", 5),
+            lab(1, "Creatinine", 2.0, "mg/dL", "2026-09-01", 40),
+            lab(3, "ALT", 80.0, "U/L", "2026-10-01", 5),
+            lab(4, "Fructosamine", 300.0, "umol/L", "2026-09-01", 40),
+        ];
+        assert!(lab_deltas(1, 7, "Velcro", &labs).is_empty());
     }
 }

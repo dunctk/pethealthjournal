@@ -283,6 +283,7 @@ pub struct LabReport {
     pub test_date: Option<String>,
     pub imported_at: DateTime<Utc>,
     pub parse_status: String,
+    pub has_original: bool,
     pub results: Vec<LabResult>,
 }
 

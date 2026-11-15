@@ -4,6 +4,8 @@ COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
 COPY templates ./templates
 COPY static ./static
+ARG GIT_SHA=""
+ENV GIT_SHA=${GIT_SHA}
 RUN cargo build --release --locked
 
 FROM debian:bookworm-slim

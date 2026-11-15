@@ -66,6 +66,8 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           tags: |
             ${{ env.IMAGE_NAME }}:mvp
             ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
@@ -107,3 +109,23 @@ jobs:
             --header "Authorization: Bearer $COOLIFY_TOKEN" \
             "https://cfy.innermaps.org/api/v1/deploy?uuid=${SERVICE_UUID}&force=false"
           echo
+
+      # Fail the run unless production actually serves this commit, so a
+      # restart that reused an old image is caught instead of reported green.
+      - name: Verify production runs this commit
+        shell: bash
+        env:
+          EXPECTED: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 40); do
+            commit=$(curl -fsS --max-time 10 https://app.pethealthjournal.com/version | jq -r .commit || true)
+            if [[ "$commit" == "$EXPECTED" ]]; then
+              echo "Production is serving $commit"
+              exit 0
+            fi
+            echo "Attempt $attempt: production reports ${commit:-unreachable}; waiting"
+            sleep 15
+          done
+          echo "::error::Production did not report commit $EXPECTED within 10 minutes"
+          exit 1

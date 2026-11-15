@@ -423,10 +423,21 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
             event_type TEXT NOT NULL,
             received_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS mcp_tool_calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            household_id INTEGER NOT NULL,
+            tool TEXT NOT NULL,
+            ok INTEGER NOT NULL,
+            error_code INTEGER,
+            duration_ms INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_time ON mcp_tool_calls(created_at DESC);
         "#,
     ))
     .await?;
     ensure_google_sub_column(db).await?;
+    ensure_column(db, "lab_reports", "original_file", "TEXT").await?;
 
     let now = Utc::now().to_rfc3339();
     db.execute(Statement::from_sql_and_values(
@@ -613,6 +624,93 @@ pub async fn revoke_session(db: &DatabaseConnection, token: &str) -> anyhow::Res
     ))
     .await?;
     Ok(())
+}
+
+/// Adds `table.column` if missing. SQLite lacks `ADD COLUMN IF NOT EXISTS`.
+/// Only called with compile-time identifiers, never user input.
+async fn ensure_column(
+    db: &DatabaseConnection,
+    table: &'static str,
+    column: &'static str,
+    ddl_type: &'static str,
+) -> anyhow::Result<()> {
+    let cols = db
+        .query_all(Statement::from_string(
+            DbBackend::Sqlite,
+            format!("PRAGMA table_info({table})"),
+        ))
+        .await?;
+    let has = cols.iter().any(|row| {
+        row.try_get::<String>("", "name")
+            .is_ok_and(|name| name == column)
+    });
+    if !has {
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            format!("ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"),
+        ))
+        .await?;
+    }
+    Ok(())
+}
+
+/// Records one MCP tool call for observability: tool name, outcome and
+/// latency only. Arguments and results are never stored (health data).
+pub async fn log_tool_call(
+    db: &DatabaseConnection,
+    household_id: i64,
+    tool: &str,
+    error_code: Option<i32>,
+    duration_ms: i64,
+) -> anyhow::Result<()> {
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "INSERT INTO mcp_tool_calls(household_id,tool,ok,error_code,duration_ms,created_at) VALUES(?,?,?,?,?,?)",
+        [
+            household_id.into(),
+            tool.into(),
+            (error_code.is_none() as i32).into(),
+            error_code.into(),
+            duration_ms.into(),
+            Utc::now().to_rfc3339().into(),
+        ],
+    ))
+    .await?;
+    Ok(())
+}
+
+/// Attach the stored original report file (relative path under the
+/// household's blood-test directory) to a lab report.
+pub async fn set_lab_report_original(
+    db: &DatabaseConnection,
+    household_id: i64,
+    report_id: i64,
+    relative_path: &str,
+) -> anyhow::Result<()> {
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "UPDATE lab_reports SET original_file=? WHERE household_id=? AND id=?",
+        [relative_path.into(), household_id.into(), report_id.into()],
+    ))
+    .await?;
+    Ok(())
+}
+
+/// The stored original file for one lab report, household-scoped.
+pub async fn lab_report_original(
+    db: &DatabaseConnection,
+    household_id: i64,
+    report_id: i64,
+) -> anyhow::Result<Option<String>> {
+    Ok(db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT original_file FROM lab_reports WHERE household_id=? AND id=? AND original_file IS NOT NULL",
+            [household_id.into(), report_id.into()],
+        ))
+        .await?
+        .map(|row| row.try_get::<String>("", "original_file"))
+        .transpose()?)
 }
 
 /// Idempotent `users.google_sub` column for Google OAuth linking. SQLite
@@ -1251,6 +1349,246 @@ pub async fn list_weights(
     rows.into_iter().map(weight_from_row).collect()
 }
 
+/// Owner-confirmed edit of a pet's profile fields. `None` leaves a field
+/// unchanged; `Some("")` clears an optional field. Returns false if the pet is
+/// not in the household. Name uniqueness is enforced by the schema.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_pet(
+    db: &DatabaseConnection,
+    household_id: i64,
+    actor: &str,
+    pet_id: i64,
+    name: Option<&str>,
+    species: Option<&str>,
+    breed: Option<&str>,
+    date_of_birth: Option<&str>,
+) -> anyhow::Result<bool> {
+    let now = Utc::now().to_rfc3339();
+    let transaction = db.begin().await?;
+    let result = transaction
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            r#"UPDATE pets SET
+                 name=COALESCE(?,name),
+                 species=COALESCE(?,species),
+                 breed=CASE WHEN ? IS NULL THEN breed ELSE NULLIF(?,'') END,
+                 date_of_birth=CASE WHEN ? IS NULL THEN date_of_birth ELSE NULLIF(?,'') END,
+                 updated_at=?
+               WHERE household_id=? AND id=?"#,
+            [
+                name.into(),
+                species.into(),
+                breed.into(),
+                breed.into(),
+                date_of_birth.into(),
+                date_of_birth.into(),
+                now.clone().into(),
+                household_id.into(),
+                pet_id.into(),
+            ],
+        ))
+        .await?;
+    if result.rows_affected() != 1 {
+        return Ok(false);
+    }
+    let detail = serde_json::json!({
+        "name": name, "species": species, "breed": breed, "date_of_birth": date_of_birth
+    })
+    .to_string();
+    audit(
+        &transaction,
+        household_id,
+        actor,
+        "pet.updated",
+        "pet",
+        pet_id,
+        &detail,
+        &now,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(true)
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct DeletedPet {
+    pub pet_id: i64,
+    pub name: String,
+    /// Rows removed per table, for the confirmation message and audit.
+    pub removed: std::collections::BTreeMap<String, u64>,
+    /// Stored blood-test source filenames, so the caller can remove the files
+    /// and they are not re-imported for another pet.
+    #[serde(skip)]
+    pub lab_source_files: Vec<String>,
+}
+
+/// Permanently deletes one pet and every household-scoped record about it in
+/// a single transaction, with an audit row. Returns `None` if not found.
+pub async fn delete_pet(
+    db: &DatabaseConnection,
+    household_id: i64,
+    actor: &str,
+    pet_id: i64,
+) -> anyhow::Result<Option<DeletedPet>> {
+    let now = Utc::now().to_rfc3339();
+    let transaction = db.begin().await?;
+    let Some(pet_row) = transaction
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT name FROM pets WHERE household_id=? AND id=?",
+            [household_id.into(), pet_id.into()],
+        ))
+        .await?
+    else {
+        return Ok(None);
+    };
+    let name: String = pet_row.try_get("", "name")?;
+    let lab_source_files = transaction
+        .query_all(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT source_filename AS f FROM lab_reports WHERE household_id=? AND pet_id=? UNION ALL SELECT original_file AS f FROM lab_reports WHERE household_id=? AND pet_id=? AND original_file IS NOT NULL",
+            [household_id.into(), pet_id.into(), household_id.into(), pet_id.into()],
+        ))
+        .await?
+        .into_iter()
+        .map(|row| row.try_get::<String>("", "f"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut removed = std::collections::BTreeMap::new();
+    // Children before parents so foreign keys hold even with enforcement on.
+    let steps: [(&str, &str); 12] = [
+        (
+            "lab_results",
+            "DELETE FROM lab_results WHERE report_id IN (SELECT id FROM lab_reports WHERE household_id=? AND pet_id=?)",
+        ),
+        (
+            "lab_reports",
+            "DELETE FROM lab_reports WHERE household_id=? AND pet_id=?",
+        ),
+        (
+            "medication_plan_confirmations",
+            "DELETE FROM medication_plan_confirmations WHERE household_id=? AND pet_id=?",
+        ),
+        (
+            "medication_stop_confirmations",
+            "DELETE FROM medication_stop_confirmations WHERE household_id=? AND pet_id=?",
+        ),
+        (
+            "medication_adherence",
+            "DELETE FROM medication_adherence WHERE household_id=? AND pet_id=?",
+        ),
+        (
+            "medication_prescriptions",
+            "DELETE FROM medication_prescriptions WHERE household_id=? AND pet_id=?",
+        ),
+        (
+            "medication_administrations",
+            "DELETE FROM medication_administrations WHERE household_id=? AND pet_id=?",
+        ),
+        (
+            "symptom_observations",
+            "DELETE FROM symptom_observations WHERE household_id=? AND pet_id=?",
+        ),
+        (
+            "health_events",
+            "DELETE FROM health_events WHERE household_id=? AND pet_id=?",
+        ),
+        (
+            "weight_entries",
+            "DELETE FROM weight_entries WHERE household_id=? AND pet_id=?",
+        ),
+        (
+            "pet_photos",
+            "DELETE FROM pet_photos WHERE household_id=? AND pet_id=?",
+        ),
+        (
+            "share_grants",
+            "DELETE FROM share_grants WHERE household_id=? AND pet_id=?",
+        ),
+    ];
+    for (table, sql) in steps {
+        let affected = transaction
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                sql,
+                [household_id.into(), pet_id.into()],
+            ))
+            .await?
+            .rows_affected();
+        if affected > 0 {
+            removed.insert(table.to_owned(), affected);
+        }
+    }
+    transaction
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "DELETE FROM pets WHERE household_id=? AND id=?",
+            [household_id.into(), pet_id.into()],
+        ))
+        .await?;
+    let detail = serde_json::json!({"name": name, "removed": removed}).to_string();
+    audit(
+        &transaction,
+        household_id,
+        actor,
+        "pet.deleted",
+        "pet",
+        pet_id,
+        &detail,
+        &now,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(Some(DeletedPet {
+        pet_id,
+        name,
+        removed,
+        lab_source_files,
+    }))
+}
+
+/// Deletes one mistaken weight entry, household-scoped; the audit row keeps
+/// a snapshot. Returns that snapshot, or `None` if not found.
+pub async fn delete_weight(
+    db: &DatabaseConnection,
+    household_id: i64,
+    actor: &str,
+    weight_id: i64,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let now = Utc::now().to_rfc3339();
+    let transaction = db.begin().await?;
+    let Some(row) = transaction
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT json_object('id',id,'pet_id',pet_id,'weight_kg',weight_kg,'measured_at',measured_at,'note',note) AS snapshot FROM weight_entries WHERE household_id=? AND id=?",
+            [household_id.into(), weight_id.into()],
+        ))
+        .await?
+    else {
+        return Ok(None);
+    };
+    let snapshot: String = row.try_get("", "snapshot")?;
+    transaction
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "DELETE FROM weight_entries WHERE household_id=? AND id=?",
+            [household_id.into(), weight_id.into()],
+        ))
+        .await?;
+    audit(
+        &transaction,
+        household_id,
+        actor,
+        "weight.deleted",
+        "weight_entry",
+        weight_id,
+        &snapshot,
+        &now,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(Some(serde_json::from_str(&snapshot)?))
+}
+
 pub async fn create_pet_photo(
     db: &DatabaseConnection,
     household_id: i64,
@@ -1540,7 +1878,7 @@ pub async fn list_lab_reports(
 ) -> anyhow::Result<Vec<crate::domain::LabReport>> {
     let reports = db.query_all(Statement::from_sql_and_values(
         DbBackend::Sqlite,
-        "SELECT r.id,r.pet_id,p.name,r.source_filename,r.raw_text,r.test_date,r.imported_at,r.parse_status FROM lab_reports r JOIN pets p ON p.id=r.pet_id WHERE r.household_id=? AND r.pet_id=? ORDER BY COALESCE(r.test_date,r.imported_at) DESC LIMIT 50",
+        "SELECT r.id,r.pet_id,p.name,r.source_filename,r.raw_text,r.test_date,r.imported_at,r.parse_status,(r.original_file IS NOT NULL) AS has_original FROM lab_reports r JOIN pets p ON p.id=r.pet_id WHERE r.household_id=? AND r.pet_id=? ORDER BY COALESCE(r.test_date,r.imported_at) DESC LIMIT 50",
         [household_id.into(), pet_id.into()],
     )).await?;
     let mut output = Vec::with_capacity(reports.len());
@@ -1577,6 +1915,7 @@ pub async fn list_lab_reports(
                 .parse()
                 .context("invalid lab timestamp")?,
             parse_status: row.try_get("", "parse_status")?,
+            has_original: row.try_get::<i64>("", "has_original")? != 0,
             results,
         });
     }

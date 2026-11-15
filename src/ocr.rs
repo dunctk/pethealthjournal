@@ -188,6 +188,131 @@ async fn ocr_document(config: &Config, bytes: &[u8], path: &Path) -> anyhow::Res
     Ok(pages.join("\n\n"))
 }
 
+/// Hosts an MCP client may hand us file download URLs from (suffix match).
+/// Override with `MCP_FILE_URL_HOSTS` (comma-separated).
+fn allowed_file_hosts() -> Vec<String> {
+    std::env::var("MCP_FILE_URL_HOSTS")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "oaiusercontent.com,openai.com,chatgpt.com".into())
+        .split(',')
+        .map(|h| h.trim().trim_start_matches('.').to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect()
+}
+
+fn host_allowed(url: &reqwest::Url, allowed: &[String]) -> bool {
+    url.scheme() == "https"
+        && url.host_str().is_some_and(|host| {
+            let host = host.to_ascii_lowercase();
+            allowed
+                .iter()
+                .any(|a| host == *a || host.ends_with(&format!(".{a}")))
+        })
+}
+
+/// Downloads a file an MCP client attached (e.g. ChatGPT `openai/fileParams`),
+/// only over HTTPS from allow-listed hosts (redirects re-checked), up to
+/// `MAX_UPLOAD_BYTES`, and only PDF/PNG/JPEG/AVIF. Returns bytes + extension.
+pub async fn fetch_client_file(download_url: &str) -> anyhow::Result<(Vec<u8>, &'static str)> {
+    let allowed = allowed_file_hosts();
+    let url = reqwest::Url::parse(download_url).map_err(|_| anyhow!("invalid file URL"))?;
+    if !host_allowed(&url, &allowed) {
+        return Err(anyhow!(
+            "file host {} is not allowed",
+            url.host_str().unwrap_or("?")
+        ));
+    }
+    let redirect_hosts = allowed.clone();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 3 || !host_allowed(attempt.url(), &redirect_hosts) {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
+        .build()?;
+    let mut response = client.get(url).send().await?.error_for_status()?;
+    if response
+        .content_length()
+        .is_some_and(|len| len as usize > MAX_UPLOAD_BYTES)
+    {
+        return Err(anyhow!("file is larger than 25 MB"));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() > MAX_UPLOAD_BYTES {
+            return Err(anyhow!("file is larger than 25 MB"));
+        }
+    }
+    let extension = sniff_extension(&bytes).ok_or_else(|| anyhow!("file is not a PDF or image"))?;
+    Ok((bytes, extension))
+}
+
+/// Identify the file type from magic bytes, never from client claims.
+pub fn sniff_extension(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"%PDF-") {
+        Some("pdf")
+    } else if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some("png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpg")
+    } else if bytes.len() > 12 && &bytes[4..8] == b"ftyp" && &bytes[8..12] == b"avif" {
+        Some("avif")
+    } else {
+        None
+    }
+}
+
+/// Stores an original report under `<household>/originals/`, which the
+/// folder importer never scans, so it is not OCR-imported a second time.
+/// Returns the path relative to the household directory.
+pub async fn store_original(
+    config: &Config,
+    household_id: i64,
+    report_id: i64,
+    bytes: &[u8],
+    extension: &str,
+) -> anyhow::Result<String> {
+    let directory = household_directory(config, household_id)?.join("originals");
+    tokio::fs::create_dir_all(&directory).await?;
+    let relative = format!(
+        "originals/report-{report_id}-{}.{extension}",
+        &hex_hash(bytes)[..12]
+    );
+    tokio::fs::write(
+        household_directory(config, household_id)?.join(&relative),
+        bytes,
+    )
+    .await?;
+    Ok(relative)
+}
+
+/// Resolve a stored relative path inside the household directory, refusing
+/// anything that could escape it.
+pub fn household_file(
+    config: &Config,
+    household_id: i64,
+    relative: &str,
+) -> anyhow::Result<PathBuf> {
+    let rel = Path::new(relative);
+    if rel.is_absolute()
+        || rel
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(anyhow!("invalid stored path"));
+    }
+    Ok(household_directory(config, household_id)?.join(rel))
+}
+
+pub fn mime_for_extension(path: &Path) -> Option<&'static str> {
+    mime_for(path)
+}
+
 fn is_supported(path: &Path) -> bool {
     matches!(
         path.extension()
@@ -388,10 +513,10 @@ fn parse_number(value: &str) -> Option<f64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn test_config(root: &Path) -> Config {
+    pub(crate) fn test_config(root: &Path) -> Config {
         Config {
             host: "127.0.0.1".into(),
             port: 3000,
