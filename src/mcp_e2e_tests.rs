@@ -380,6 +380,8 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
     let pets = h.ok(&owner, "list_pets", json!({})).await;
     assert_eq!(pets["items"].as_array().unwrap().len(), 0);
 
+    lab_integrity_scenario(&mut h, &owner, &stranger).await;
+
     // Every listed tool was exercised, except provider-backed ones.
     let missing: Vec<_> = tools
         .iter()
@@ -411,4 +413,332 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
     let (status, body) = h.get("/version").await;
     assert_eq!(status, StatusCode::OK);
     assert!(serde_json::from_str::<Value>(&body).unwrap()["commit"].is_string());
+}
+
+/// De-identified reproduction of real failures: an OCR import whose
+/// biochemistry pages were dropped, whose "1.096,20 /µL" was stored as
+/// 1.096, and whose date was never found; then the fixes, through MCP only.
+async fn lab_integrity_scenario(h: &mut Harness, owner: &str, stranger: &str) {
+    let pet = h
+        .ok(owner, "add_pet", json!({"name":"Tabby","species":"Cat"}))
+        .await;
+    let pet_id = pet["pet_id"].as_i64().unwrap();
+    let household_id: i64 = h
+        .state
+        .db
+        .query_one(sea_orm::Statement::from_string(
+            sea_orm::DbBackend::Sqlite,
+            "SELECT household_id FROM users WHERE email='owner@example.test'".to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "household_id")
+        .unwrap();
+    let ocr_text = "Datos personales\nTABBY\nFecha toma de muestra\n16/05/2023\n\nHEMOGRAMA\n\
+|  HEMATOCRITO | 35,9 | % | (29,0-52,0)  |\n| --- | --- | --- | --- |\n\
+|  EOSINÓFILOS | 6 | % |   |\n|  EOSINÓFILOS | 1.096,20 | /µL | (100,00-1.200,00)  |\n1 de 2\n\n\
+UREA / SUERO\n\nQuímica seca - Espectrofotometría\n\nRESULTADO... 63 ↑ mg/dL (30-60)\n\n\
+SDMA (Dimetilarginina simétrica)\n\nInmunoturbidimetría\n\nRESULTADO... 15,5 ↑ µg/dL (<14,0)\n2 de 2\n\n\
+UREA / SUERO\n\nQuímica seca - Espectrofotometría\n\nRESULTADO... 63 ↑ mg/dL (30-60)\n2 de 2";
+    // What the old parser stored: hematology only, eosinophils misread, no date.
+    let legacy = |name: &str, value: &str, num: f64, unit: &str| crate::ocr::ParsedLabResult {
+        test_name: name.into(),
+        value_text: value.into(),
+        value_numeric: Some(num),
+        unit: Some(unit.into()),
+        reference_range: None,
+        flag: None,
+        parse_status: String::new(),
+    };
+    let legacy_id = db::create_lab_report(
+        &h.state.db,
+        household_id,
+        "user:test",
+        pet_id,
+        "16-05-23 Blood test.pdf",
+        "hash-legacy",
+        ocr_text,
+        None,
+        &[
+            legacy("HEMATOCRITO", "35,9", 35.9, "%"),
+            legacy("EOSINÓFILOS", "6", 6.0, "%"),
+            legacy("EOSINÓFILOS", "1.096,20", 1.096, "/µL"),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let report = h
+        .ok(owner, "get_blood_test", json!({"report_id":legacy_id}))
+        .await;
+    assert_eq!(report["result_count"], 3);
+    assert_eq!(report["can_reprocess"], true);
+    assert_eq!(report["test_date"], Value::Null);
+    let hidden = h
+        .err(stranger, "get_blood_test", json!({"report_id":legacy_id}))
+        .await;
+    assert!(hidden.contains("not in this household"), "{hidden}");
+
+    // Preview: finds the dropped pages, the misread number and the date.
+    let preview = h
+        .ok(
+            owner,
+            "reprocess_blood_test",
+            json!({"report_id":legacy_id}),
+        )
+        .await;
+    assert_eq!(preview["dry_run"], true);
+    assert_eq!(preview["applied"], false);
+    assert_eq!(preview["number_format"], "decimal_comma");
+    let missing: Vec<&str> = preview["missing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["test_name"].as_str().unwrap())
+        .collect();
+    assert!(
+        missing.contains(&"UREA / SUERO") && missing.contains(&"SDMA (Dimetilarginina simétrica)"),
+        "{missing:?}"
+    );
+    assert_eq!(
+        missing.len(),
+        2,
+        "the repeated UREA page is not added twice: {missing:?}"
+    );
+    let eos_fix = preview["corrections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["before"]["value_text"] == "1.096,20")
+        .expect("eosinophil correction");
+    assert_eq!(eos_fix["after"]["value_numeric"], 1096.2);
+    assert_eq!(preview["test_date"]["action"], "fill");
+    assert_eq!(preview["test_date"]["found_in_source"], "2023-05-16");
+    // Nothing changed yet.
+    let still = h
+        .ok(owner, "get_blood_test", json!({"report_id":legacy_id}))
+        .await;
+    assert_eq!(still["result_count"], 3);
+    let refused = h
+        .err(
+            owner,
+            "reprocess_blood_test",
+            json!({"report_id":legacy_id,"dry_run":false}),
+        )
+        .await;
+    assert!(refused.contains("confirm"), "{refused}");
+
+    let applied = h
+        .ok(
+            owner,
+            "reprocess_blood_test",
+            json!({"report_id":legacy_id,"dry_run":false,"confirm":true}),
+        )
+        .await;
+    assert_eq!(applied["applied"], true);
+    let fixed = h
+        .ok(owner, "get_blood_test", json!({"report_id":legacy_id}))
+        .await;
+    assert_eq!(fixed["result_count"], 5);
+    assert_eq!(fixed["test_date"], "2023-05-16");
+    let eos = fixed["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["value_text"] == "1.096,20")
+        .unwrap();
+    assert_eq!(eos["value_numeric"], 1096.2);
+    assert_eq!(eos["parse_status"], "validated");
+    assert_eq!(eos["standard"]["analyte"], "eosinophils");
+    // Idempotent: a second run has nothing left to do and adds nothing.
+    let again = h
+        .ok(
+            owner,
+            "reprocess_blood_test",
+            json!({"report_id":legacy_id,"dry_run":false,"confirm":true}),
+        )
+        .await;
+    assert_eq!(again["applied"], false);
+    assert_eq!(
+        h.ok(owner, "get_blood_test", json!({"report_id":legacy_id}))
+            .await["result_count"],
+        5
+    );
+
+    // A later report from the same lab, transcribed by an assistant.
+    let later = h.ok(owner, "record_blood_test", json!({"pet_id":pet_id,"test_date":"2024-01-16","results":[
+        {"test_name":"EOSINÓFILOS","value":"775,00","unit":"/µL","reference_range":"100,00-1.200,00"},
+        {"test_name":"HEMATOCRITO","value":"36,9","unit":"%"}],"confirm":true})).await;
+    let later_id = later["report_id"].as_i64().unwrap();
+    let insights = h
+        .ok(owner, "get_health_insights", json!({"pet_id":pet_id}))
+        .await;
+    let eos_trend = insights["items"]
+        .as_array()
+        .or(insights.as_array())
+        .unwrap()
+        .iter()
+        .find(|f| {
+            f["summary"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Eosinophils")
+        })
+        .unwrap_or_else(|| panic!("no eosinophil finding: {insights}"));
+    let summary = eos_trend["summary"].as_str().unwrap();
+    assert!(summary.contains("-29.3%"), "{summary}");
+    let reprocess_assistant = h
+        .err(owner, "reprocess_blood_test", json!({"report_id":later_id}))
+        .await;
+    assert!(
+        reprocess_assistant.contains("upsert_blood_test_results"),
+        "{reprocess_assistant}"
+    );
+
+    // Metadata: preview, then apply.
+    let meta = h
+        .ok(
+            owner,
+            "update_blood_test_metadata",
+            json!({"report_id":later_id,"label":"Jan 2024 hematology"}),
+        )
+        .await;
+    assert_eq!(meta["applied"], false);
+    let meta = h
+        .ok(
+            owner,
+            "update_blood_test_metadata",
+            json!({"report_id":later_id,"label":"Jan 2024 hematology","confirm":true}),
+        )
+        .await;
+    assert_eq!(meta["applied"], true);
+    let bad_date = h
+        .err(
+            owner,
+            "update_blood_test_metadata",
+            json!({"report_id":later_id,"test_date":"16/01/2024","confirm":true}),
+        )
+        .await;
+    assert!(bad_date.contains("YYYY-MM-DD"), "{bad_date}");
+
+    // Add a missing analyte and correct a value, preview first.
+    let edits = json!({"report_id":later_id,"results":[
+        {"test_name":"SDMA","value":"10,3","unit":"µg/dL","reference_range":"<14,0"},
+        {"test_name":"HEMATOCRITO","value":"37,1","unit":"%"}]});
+    let plan = h
+        .ok(owner, "upsert_blood_test_results", edits.clone())
+        .await;
+    assert_eq!(plan["applied"], false);
+    assert_eq!(plan["to_add"].as_array().unwrap().len(), 1);
+    assert_eq!(plan["to_correct"].as_array().unwrap().len(), 1);
+    let mut confirmed = edits.clone();
+    confirmed["confirm"] = json!(true);
+    let done = h.ok(owner, "upsert_blood_test_results", confirmed).await;
+    assert_eq!(done["applied"], true);
+    let later_report = h
+        .ok(owner, "get_blood_test", json!({"report_id":later_id}))
+        .await;
+    let hct = later_report["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["test_name"] == "HEMATOCRITO")
+        .unwrap();
+    assert_eq!(hct["value_numeric"], 37.1);
+
+    // The same test entered twice: found, previewed, merged on approval.
+    let dup = h
+        .ok(
+            owner,
+            "record_blood_test",
+            json!({"pet_id":pet_id,"test_date":"2024-01-16","results":[
+        {"test_name":"EOSINÓFILOS","value":"775,00","unit":"/µL"},
+        {"test_name":"HEMATOCRITO","value":"37,1","unit":"%"},
+        {"test_name":"PLAQUETAS","value":"111.000","unit":"/µL"}],"confirm":true}),
+        )
+        .await;
+    let dup_id = dup["report_id"].as_i64().unwrap();
+    let found = h
+        .ok(
+            owner,
+            "find_duplicate_blood_tests",
+            json!({"pet_id":pet_id}),
+        )
+        .await;
+    let pair = found["possible_duplicates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["report_ids"].as_array().unwrap().contains(&json!(dup_id)))
+        .unwrap_or_else(|| panic!("duplicate not found: {found}"));
+    assert!(
+        pair["report_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(later_id))
+    );
+    let merge_preview = h
+        .ok(
+            owner,
+            "merge_blood_tests",
+            json!({"keep_report_id":later_id,"remove_report_id":dup_id}),
+        )
+        .await;
+    assert_eq!(merge_preview["applied"], false);
+    assert_eq!(
+        merge_preview["results_to_move"].as_array().unwrap().len(),
+        1
+    );
+    assert!(
+        h.ok(owner, "get_blood_test", json!({"report_id":dup_id}))
+            .await["result_count"]
+            == 3,
+        "preview deleted nothing"
+    );
+    let merged = h
+        .ok(
+            owner,
+            "merge_blood_tests",
+            json!({"keep_report_id":later_id,"remove_report_id":dup_id,"confirm":true}),
+        )
+        .await;
+    assert_eq!(merged["applied"], true);
+    let gone = h
+        .err(owner, "get_blood_test", json!({"report_id":dup_id}))
+        .await;
+    assert!(gone.contains("not in this household"));
+    let kept = h
+        .ok(owner, "get_blood_test", json!({"report_id":later_id}))
+        .await;
+    assert!(
+        kept["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["test_name"] == "PLAQUETAS")
+    );
+    let cross = h
+        .err(
+            stranger,
+            "merge_blood_tests",
+            json!({"keep_report_id":later_id,"remove_report_id":legacy_id,"confirm":true}),
+        )
+        .await;
+    assert!(cross.contains("household"), "{cross}");
+
+    // Every correction left an audit entry with before/after values.
+    let audits: i64 = h
+        .state
+        .db
+        .query_one(sea_orm::Statement::from_string(
+            sea_orm::DbBackend::Sqlite,
+            "SELECT COUNT(*) AS n FROM audit_events WHERE action IN ('lab_report.reprocessed','lab_report.metadata_updated','lab_report.results_edited','lab_report.merged')".to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "n")
+        .unwrap();
+    assert_eq!(audits, 4);
 }

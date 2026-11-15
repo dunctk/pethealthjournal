@@ -296,6 +296,9 @@ pub struct LabResult {
     pub unit: Option<String>,
     pub reference_range: Option<String>,
     pub flag: Option<String>,
+    /// How `value_numeric` was read (validated, ambiguous, failed, text,
+    /// censored). None for results saved before this was recorded.
+    pub parse_status: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]

@@ -630,6 +630,40 @@ pub async fn save_findings<C: ConnectionTrait>(
 }
 
 /// Read persisted findings for one pet, newest first. Household-scoped.
+/// Remove a pet's stored findings that the latest computation no longer
+/// produces, e.g. a lab change that came from a since-corrected value.
+/// Dismissed findings are kept: they record the owner's decision.
+pub async fn prune_stale_findings<C: ConnectionTrait>(
+    db: &C,
+    household_id: i64,
+    pet_id: i64,
+    current: &[HealthFinding],
+) -> anyhow::Result<u64> {
+    let keys: Vec<String> = current.iter().map(|f| f.dedupe_key.clone()).collect();
+    let rows = db
+        .query_all(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT id, dedupe_key FROM health_insights WHERE household_id=? AND pet_id=? AND status != 'dismissed'",
+            [household_id.into(), pet_id.into()],
+        ))
+        .await?;
+    let mut removed = 0;
+    for row in rows {
+        let key: String = row.try_get("", "dedupe_key")?;
+        if !keys.contains(&key) {
+            let id: i64 = row.try_get("", "id")?;
+            db.execute(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "DELETE FROM health_insights WHERE id=? AND household_id=?",
+                [id.into(), household_id.into()],
+            ))
+            .await?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 pub async fn list_findings<C: ConnectionTrait>(
     db: &C,
     household_id: i64,

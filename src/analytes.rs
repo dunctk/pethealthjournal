@@ -135,6 +135,8 @@ const ANALYTES: &[Analyte] = &[
             "alt (gpt)",
             "alt/gpt",
             "gpt/alt",
+            "alt-gpt",
+            "gpt-alt",
             "gpt",
             "sgpt",
             "alat",
@@ -152,6 +154,9 @@ const ANALYTES: &[Analyte] = &[
             "ast (got)",
             "ast/got",
             "got/ast",
+            "ast-got",
+            "asgt-got",
+            "got-ast",
             "got",
             "sgot",
             "asat",
@@ -198,6 +203,8 @@ const ANALYTES: &[Analyte] = &[
             "protein",
             "proteinas totales",
             "proteínas totales",
+            "proteína total",
+            "proteina total",
             "protéines totales",
         ],
         canonical_unit: "g/L",
@@ -284,7 +291,7 @@ const ANALYTES: &[Analyte] = &[
             "leucocytes",
         ],
         canonical_unit: "×10⁹/L",
-        units: &[("10^9/l", 1.0), ("10^3/ul", 1.0)],
+        units: &[("10^9/l", 1.0), ("10^3/ul", 1.0), ("/ul", 0.001)],
     },
     Analyte {
         key: "rbc",
@@ -299,7 +306,7 @@ const ANALYTES: &[Analyte] = &[
             "érythrocytes",
         ],
         canonical_unit: "×10¹²/L",
-        units: &[("10^12/l", 1.0), ("10^6/ul", 1.0)],
+        units: &[("10^12/l", 1.0), ("10^6/ul", 1.0), ("/ul", 0.000_001)],
     },
     Analyte {
         key: "platelets",
@@ -312,7 +319,102 @@ const ANALYTES: &[Analyte] = &[
             "thrombocytes",
         ],
         canonical_unit: "×10⁹/L",
-        units: &[("10^9/l", 1.0), ("10^3/ul", 1.0)],
+        units: &[("10^9/l", 1.0), ("10^3/ul", 1.0), ("/ul", 0.001)],
+    },
+    // White-cell differential, absolute counts. Percentages ("%") are a
+    // different measurement and stay separate (unknown unit → own key).
+    Analyte {
+        key: "neutrophils",
+        label: "Neutrophils",
+        aliases: &[
+            "neutrophils",
+            "neu",
+            "neut",
+            "neutrófilos",
+            "neutrofilos",
+            "segmentados",
+            "neutrófilos segmentados",
+            "segmented neutrophils",
+        ],
+        canonical_unit: "×10⁹/L",
+        units: &[("10^9/l", 1.0), ("10^3/ul", 1.0), ("/ul", 0.001)],
+    },
+    Analyte {
+        key: "band_neutrophils",
+        label: "Band neutrophils",
+        aliases: &[
+            "bands",
+            "band neutrophils",
+            "cayados",
+            "neutrófilos en banda",
+        ],
+        canonical_unit: "×10⁹/L",
+        units: &[("10^9/l", 1.0), ("10^3/ul", 1.0), ("/ul", 0.001)],
+    },
+    Analyte {
+        key: "lymphocytes",
+        label: "Lymphocytes",
+        aliases: &["lymphocytes", "lym", "lymph", "linfocitos"],
+        canonical_unit: "×10⁹/L",
+        units: &[("10^9/l", 1.0), ("10^3/ul", 1.0), ("/ul", 0.001)],
+    },
+    Analyte {
+        key: "monocytes",
+        label: "Monocytes",
+        aliases: &["monocytes", "mono", "mon", "monocitos"],
+        canonical_unit: "×10⁹/L",
+        units: &[("10^9/l", 1.0), ("10^3/ul", 1.0), ("/ul", 0.001)],
+    },
+    Analyte {
+        key: "eosinophils",
+        label: "Eosinophils",
+        aliases: &["eosinophils", "eos", "eosinófilos", "eosinofilos"],
+        canonical_unit: "×10⁹/L",
+        units: &[("10^9/l", 1.0), ("10^3/ul", 1.0), ("/ul", 0.001)],
+    },
+    Analyte {
+        key: "basophils",
+        label: "Basophils",
+        aliases: &["basophils", "baso", "bas", "basófilos", "basofilos"],
+        canonical_unit: "×10⁹/L",
+        units: &[("10^9/l", 1.0), ("10^3/ul", 1.0), ("/ul", 0.001)],
+    },
+    Analyte {
+        key: "mcv",
+        label: "MCV",
+        aliases: &[
+            "mcv",
+            "vcm",
+            "volumen corpuscular medio",
+            "mean corpuscular volume",
+        ],
+        canonical_unit: "fL",
+        units: &[("fl", 1.0)],
+    },
+    Analyte {
+        key: "mch",
+        label: "MCH",
+        aliases: &[
+            "mch",
+            "hcm",
+            "hemoglobina corpuscular media",
+            "mean corpuscular hemoglobin",
+        ],
+        canonical_unit: "pg",
+        units: &[("pg", 1.0)],
+    },
+    Analyte {
+        key: "mchc",
+        label: "MCHC",
+        aliases: &[
+            "mchc",
+            "chcm",
+            "c. hem. corpuscular media",
+            "concentración de hemoglobina corpuscular media",
+            "mean corpuscular hemoglobin concentration",
+        ],
+        canonical_unit: "g/L",
+        units: &[("g/l", 1.0), ("g/dl", 10.0)],
     },
     Analyte {
         key: "usg",
@@ -371,13 +473,49 @@ pub fn normalize_unit(unit: &str) -> String {
 
 /// Map a printed result to its standard key/unit. `value` is the numeric
 /// value as printed (already parsed), if any.
+/// Lab qualifiers that don't change which analyte was measured: the sample
+/// ("UREA / SUERO", "Glucose (serum)") and a printed full name in brackets
+/// ("SDMA (Dimetilarginina simétrica)"). Urine ("/ ORINA") is deliberately
+/// kept: urine creatinine is not serum creatinine.
+fn without_qualifiers(name: &str) -> String {
+    let mut n = name.to_owned();
+    for suffix in [
+        " / suero",
+        "/ suero",
+        " /suero",
+        " / plasma",
+        "/ plasma",
+        " serum",
+        " sérum",
+    ] {
+        if let Some(stripped) = n.strip_suffix(suffix) {
+            n = stripped.trim().to_owned();
+        }
+    }
+    if let Some(open) = n.find('(')
+        && n.trim_end().ends_with(')')
+        && !n[open..].contains("orina")
+        && !n[open..].contains("urine")
+        && open > 0
+    {
+        n = n[..open].trim().to_owned();
+    }
+    n
+}
+
+fn find_analyte(name: &str) -> Option<&'static Analyte> {
+    let matches = |candidate: &str| {
+        ANALYTES
+            .iter()
+            .find(|a| a.aliases.iter().any(|alias| *alias == candidate))
+    };
+    matches(name).or_else(|| matches(&without_qualifiers(name)))
+}
+
 pub fn standardize(test_name: &str, unit: Option<&str>, value: Option<f64>) -> Standardized {
     let name = normalize_name(test_name);
     let unit_norm = unit.map(normalize_unit).unwrap_or_default();
-    if let Some(analyte) = ANALYTES
-        .iter()
-        .find(|a| a.aliases.iter().any(|alias| *alias == name))
-    {
+    if let Some(analyte) = find_analyte(&name) {
         if let Some((_, factor)) = analyte.units.iter().find(|(u, _)| *u == unit_norm) {
             return Standardized {
                 key: analyte.key.to_owned(),
@@ -459,6 +597,39 @@ mod tests {
         let wbc = standardize("WBC", Some("K/uL"), Some(8.2));
         assert_eq!(wbc.key, "wbc");
         assert_eq!(wbc.value, Some(8.2));
+    }
+
+    #[test]
+    fn white_cell_counts_per_microlitre_convert() {
+        // 1.096,20 /µL (one lab) and 0,775 ×10³/µL (another) are the same unit
+        // once converted; percentages stay a separate measurement.
+        let a = standardize("EOSINÓFILOS", Some("/µL"), Some(1096.2));
+        let b = standardize("Eosinófilos", Some("10^3/ul"), Some(0.775));
+        assert_eq!(a.key, "eosinophils");
+        assert_eq!(a.key, b.key);
+        assert_eq!(a.value, Some(1.096));
+        assert_eq!(b.value, Some(0.775));
+        let pct = standardize("Eosinófilos %", Some("%"), Some(3.35));
+        assert_ne!(pct.key, a.key);
+        let plt = standardize("PLAQUETAS", Some("/µL"), Some(362_500.0));
+        let plt2 = standardize("Plaquetas", Some("10^3"), Some(196.0));
+        assert_eq!((plt.key.as_str(), plt.value), ("platelets", Some(362.5)));
+        assert_eq!(plt.key, plt2.key);
+        let rbc = standardize("HEMATIES", Some("/µL"), Some(7_810_000.0));
+        assert_eq!(rbc.value, Some(7.81));
+        assert_eq!(
+            standardize("UREA / SUERO", Some("mg/dL"), Some(63.0)).key,
+            "urea"
+        );
+        assert_eq!(
+            standardize("SDMA (Dimetilarginina simétrica)", Some("µg/dL"), None).key,
+            "sdma"
+        );
+        assert_eq!(
+            standardize("C. hem. corpuscular media", Some("g/dl"), Some(28.4)).value,
+            Some(284.0)
+        );
+        assert_eq!(standardize("ALT-GPT", Some("U/L"), None).key, "alt");
     }
 
     #[test]

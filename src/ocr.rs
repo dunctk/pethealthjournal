@@ -1,7 +1,6 @@
 use crate::{config::Config, db, domain::Pet};
 use anyhow::anyhow;
 use base64::Engine;
-use regex::Regex;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -16,6 +15,8 @@ pub struct ParsedLabResult {
     pub unit: Option<String>,
     pub reference_range: Option<String>,
     pub flag: Option<String>,
+    /// How `value_numeric` was read: validated, ambiguous, failed or text.
+    pub parse_status: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,8 +131,9 @@ pub async fn import_directory(
             }
         };
         let text = ocr_document(config, &bytes, &file).await?;
-        let parsed = parse_results(&text);
-        let test_date = find_date(&text);
+        let report = crate::labparse::parse_report(&text);
+        let parsed = report.results;
+        let test_date = report.test_date;
         let report_id = db::create_lab_report(
             db,
             household_id,
@@ -375,142 +377,9 @@ fn match_pet(filename: &str, pets: &[Pet]) -> Option<Pet> {
         .or_else(|| (pets.len() == 1).then(|| pets[0].clone()))
 }
 
-fn is_metadata_name(name: &str) -> bool {
-    matches!(
-        name.trim().to_ascii_lowercase().as_str(),
-        "id" | "sexo"
-            | "sex"
-            | "edad"
-            | "age"
-            | "fecha"
-            | "date"
-            | "fecha de registro"
-            | "registration date"
-    )
-}
-
-fn find_date(text: &str) -> Option<String> {
-    let iso = Regex::new(r"\b(20\d{2}[-/]\d{1,2}[-/]\d{1,2})\b").unwrap();
-    if let Some(found) = iso.captures(text).and_then(|c| c.get(1)) {
-        return Some(found.as_str().replace('/', "-"));
-    }
-    Regex::new(r"\b(\d{1,2})[/.](\d{1,2})[/.](20\d{2})\b")
-        .unwrap()
-        .captures(text)
-        .map(|c| format!("{}-{:0>2}-{:0>2}", &c[3], &c[2], &c[1]))
-}
-
+#[cfg(test)]
 pub fn parse_results(text: &str) -> Vec<ParsedLabResult> {
-    let mut output = Vec::new();
-    let test_name = Regex::new(r"(?im)^(?:test|prueba)\s*:\s*(.+)$")
-        .unwrap()
-        .captures_iter(
-            text.lines()
-                .map(str::trim)
-                .collect::<Vec<_>>()
-                .join("\n")
-                .as_str(),
-        )
-        .last()
-        .and_then(|capture| capture.get(1).map(|value| value.as_str().trim().to_owned()))
-        .unwrap_or_else(|| "Blood test result".into());
-    if let Some(capture) = Regex::new(r"(?im)^(?:result|resultado)\s*:\s*(.+)$")
-        .unwrap()
-        .captures_iter(
-            text.lines()
-                .map(str::trim)
-                .collect::<Vec<_>>()
-                .join("\n")
-                .as_str(),
-        )
-        .next()
-    {
-        let labeled_value = capture[1].trim();
-        let number = Regex::new(r"[-+]?\d+(?:[.,]\d+)?")
-            .unwrap()
-            .find(labeled_value);
-        let value_text = number
-            .map(|number| number.as_str().to_owned())
-            .unwrap_or_else(|| labeled_value.to_owned());
-        let unit = number.and_then(|number| {
-            let unit = labeled_value[number.end()..].trim();
-            (!unit.is_empty()).then(|| unit.to_owned())
-        });
-        output.push(ParsedLabResult {
-            test_name,
-            value_numeric: parse_number(&value_text),
-            value_text,
-            unit,
-            reference_range: None,
-            flag: None,
-        });
-    }
-    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let cells: Vec<_> = line
-            .trim_matches('|')
-            .split('|')
-            .map(str::trim)
-            .filter(|cell| !cell.is_empty())
-            .collect();
-        if cells.len() < 2
-            || cells.iter().any(|cell| {
-                cell.chars()
-                    .all(|c| c == '-' || c == ':' || c.is_whitespace())
-            })
-        {
-            continue;
-        }
-        let numeric_index = cells.iter().position(|cell| parse_number(cell).is_some());
-        let Some(index) = numeric_index else {
-            continue;
-        };
-        let name = cells.first().unwrap().trim();
-        if name.len() < 2
-            || name.eq_ignore_ascii_case("test")
-            || name.eq_ignore_ascii_case("prueba")
-            || is_metadata_name(name)
-        {
-            continue;
-        }
-        let value_text = cells[index].to_owned();
-        let unit = cells
-            .get(index + 1)
-            .filter(|value| value.len() < 20 && parse_number(value).is_none())
-            .map(|value| (*value).to_owned());
-        let reference_range = cells
-            .iter()
-            .find(|cell| {
-                cell.contains('-')
-                    && parse_number(cell.split('-').next().unwrap_or_default()).is_some()
-            })
-            .map(|value| (*value).to_owned());
-        let flag = cells
-            .iter()
-            .find(|cell| {
-                matches!(
-                    cell.to_ascii_lowercase().as_str(),
-                    "h" | "l" | "high" | "low" | "alto" | "bajo" | "*"
-                )
-            })
-            .map(|value| (*value).to_owned());
-        output.push(ParsedLabResult {
-            test_name: name.to_owned(),
-            value_text,
-            value_numeric: parse_number(cells[index]),
-            unit,
-            reference_range,
-            flag,
-        });
-    }
-    output
-}
-
-fn parse_number(value: &str) -> Option<f64> {
-    let cleaned = value.trim().replace(',', ".");
-    Regex::new(r"[-+]?\d+(?:\.\d+)?")
-        .unwrap()
-        .find(&cleaned)
-        .and_then(|m| m.as_str().parse().ok())
+    crate::labparse::parse_report(text).results
 }
 
 #[cfg(test)]

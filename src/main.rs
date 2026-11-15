@@ -9,6 +9,9 @@ mod domain;
 mod email;
 mod entitlements;
 mod insights;
+mod labedit;
+mod labparse;
+mod labvalue;
 #[cfg(test)]
 mod login_code_tests;
 mod mcp;

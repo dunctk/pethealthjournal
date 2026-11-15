@@ -780,6 +780,35 @@ async fn handle(
 }
 
 fn tool_list() -> Value {
+    let mut list = core_tool_list();
+    if let Some(tools) = list.get_mut("tools").and_then(Value::as_array_mut) {
+        tools.extend(lab_edit_tools());
+    }
+    list
+}
+
+/// Tools for correcting stored blood tests. Each previews by default and
+/// changes nothing until called again with confirm:true.
+fn lab_edit_tools() -> Vec<Value> {
+    let result_item = json!({"type":"object","properties":{
+        "result_id":{"type":"integer","description":"Stored result to correct (from get_blood_test). Omit to add a new analyte."},
+        "test_name":{"type":"string","maxLength":120,"description":"Analyte exactly as printed."},
+        "value":{"type":"string","maxLength":60,"description":"Value exactly as printed, e.g. '1.096,20', '<0,10', 'Negativo'."},
+        "unit":{"type":"string","maxLength":40},
+        "reference_range":{"type":"string","maxLength":80},
+        "flag":{"type":"string","enum":["high","low","normal","abnormal"]}},
+        "required":["test_name","value"]});
+    vec![
+        json!({"name":"get_blood_test","description":"Read one blood-test report with every stored result and its result_id, the parse status of each number (validated, ambiguous, failed, text, censored, or null for results saved before statuses existed), and whether the original file is attached. Use before correcting a report.","inputSchema":{"type":"object","properties":{"report_id":{"type":"integer"}},"required":["report_id"]},"annotations":{"readOnlyHint":true}}),
+        json!({"name":"reprocess_blood_test","description":"Re-read a server-imported (OCR) report from its stored text with the current parser, to find analytes that were missed and numbers that were misread (e.g. '1.096,20' read as 1.096). Runs as a preview by default (dry_run:true) and returns missing analytes, proposed corrections, conflicts and unchanged results. Conflicts (a printed value that differs from the stored one, or a stored result not found in the text) are never changed by this tool. To apply, show the owner the preview, get approval, then call with dry_run:false and confirm:true; the existing report is updated, never duplicated. Not available for reports an assistant transcribed: use upsert_blood_test_results for those.","inputSchema":{"type":"object","properties":{"report_id":{"type":"integer"},"dry_run":{"type":"boolean","default":true},"confirm":{"type":"boolean","default":false}},"required":["report_id"]}}),
+        json!({"name":"update_blood_test_metadata","description":"Correct a report's test (sample collection) date or its label. Without confirm:true it only previews the change. Use the date printed on the report; ask the owner when day/month order is unclear.","inputSchema":{"type":"object","properties":{"report_id":{"type":"integer"},"test_date":{"type":"string","description":"YYYY-MM-DD"},"label":{"type":"string","maxLength":200},"confirm":{"type":"boolean","default":false}},"required":["report_id"]}}),
+        json!({"name":"upsert_blood_test_results","description":"Add analytes missing from an existing report, or correct stored ones (value, unit, reference range, flag), after reading the original report. Matches by result_id when given, otherwise by analyte and unit. Without confirm:true it returns a preview of additions and corrections; show it to the owner and apply only after explicit approval. Every change is audited with before and after values.","inputSchema":{"type":"object","properties":{"report_id":{"type":"integer"},"results":{"type":"array","minItems":1,"maxItems":200,"items":result_item},"confirm":{"type":"boolean","default":false}},"required":["report_id","results"]},"annotations":{"destructiveHint":true}}),
+        json!({"name":"find_duplicate_blood_tests","description":"List pairs of reports for one pet that look like the same test entered twice (same or missing date, mostly identical values), with a suggested report to keep. Read-only; nothing is deleted.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}}),
+        json!({"name":"merge_blood_tests","description":"Merge a duplicate report into the one to keep: results only the duplicate has are moved, its original file is adopted if the kept report has none, then the duplicate is deleted (a full copy is kept in the audit trail). Disagreeing values keep the kept report's value and are listed. Without confirm:true it only previews. Only apply after the owner explicitly approves this merge.","inputSchema":{"type":"object","properties":{"keep_report_id":{"type":"integer"},"remove_report_id":{"type":"integer"},"confirm":{"type":"boolean","default":false}},"required":["keep_report_id","remove_report_id"]},"annotations":{"destructiveHint":true}}),
+    ]
+}
+
+fn core_tool_list() -> Value {
     json!({"tools":[
         {"name":"list_pets","description":"List the pets in the signed-in household.","inputSchema":{"type":"object","properties":{}},"annotations":{"readOnlyHint":true}},
         {"name":"get_pet_timeline","description":"Read active health events for one pet, newest first. The owner's original wording is preserved in raw_input. Prefer narrow date ranges and small limits over bulk history.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":25},"offset":{"type":"integer","minimum":0,"default":0},"since":{"type":"string","description":"Earliest date to include, YYYY-MM-DD."},"until":{"type":"string","description":"Latest date to include, YYYY-MM-DD."},"category":{"type":"string","enum":["symptom","observation","medication","measurement","vet_visit"],"description":"Filter by event type."}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
@@ -1053,6 +1082,9 @@ async fn call_tool(
                 .await
                 .map_err(internal)?;
             crate::insights::save_findings(&state.db, &findings)
+                .await
+                .map_err(internal)?;
+            crate::insights::prune_stale_findings(&state.db, user.household_id, pet_id, &findings)
                 .await
                 .map_err(internal)?;
             let stored = crate::insights::list_findings(
@@ -1694,6 +1726,192 @@ async fn call_tool(
                 .map_err(|error| (-32602, format!("Could not attach the original: {error}")))?;
             json!({"attached": true, "report_id": report_id})
         }
+        "get_blood_test" => {
+            let report_id = integer(&args, "report_id")?;
+            let report = crate::labedit::get_report(&state.db, user.household_id, report_id)
+                .await
+                .map_err(internal)?
+                .ok_or((
+                    -32602,
+                    "That blood-test report is not in this household.".into(),
+                ))?;
+            let results: Vec<Value> = report
+                .results
+                .iter()
+                .map(|r| {
+                    let standard = crate::analytes::standardize(&r.test_name, r.unit.as_deref(), r.value_numeric);
+                    json!({
+                        "result_id": r.id,
+                        "test_name": r.test_name,
+                        "value_text": r.value_text,
+                        "value_numeric": r.value_numeric,
+                        "parse_status": r.parse_status,
+                        "unit": r.unit,
+                        "reference_range": r.reference_range,
+                        "flag": r.flag,
+                        "standard": standard.recognized.then(|| json!({"analyte": standard.key, "value": standard.value, "unit": standard.unit})),
+                    })
+                })
+                .collect();
+            json!({
+                "report_id": report.id,
+                "pet_id": report.pet_id,
+                "pet_name": report.pet_name,
+                "label": report.source_filename,
+                "test_date": report.test_date,
+                "imported_at": report.imported_at,
+                "source": if report.parse_status == "assistant_transcribed" { "assistant_transcribed" } else { "server_ocr" },
+                "can_reprocess": report.parse_status != "assistant_transcribed" && !report.raw_text.trim().is_empty(),
+                "has_original": report.has_original,
+                "result_count": results.len(),
+                "results": results,
+            })
+        }
+        "reprocess_blood_test" => {
+            let report_id = integer(&args, "report_id")?;
+            let dry_run = args.get("dry_run").and_then(Value::as_bool).unwrap_or(true);
+            let confirm = args.get("confirm").and_then(Value::as_bool) == Some(true);
+            if !dry_run && !confirm {
+                return Err((
+                    -32602,
+                    "To apply, pass confirm:true after the owner approved the preview.".into(),
+                ));
+            }
+            let outcome = crate::labedit::reprocess(
+                &state.db,
+                user.household_id,
+                &user.audit_actor(),
+                report_id,
+                !dry_run,
+            )
+            .await
+            .map_err(internal)?
+            .map_err(|message| (-32602, message))?;
+            if outcome.applied {
+                refresh_lab_insights(state, user.household_id, report_id).await;
+            }
+            serde_json::to_value(outcome).map_err(internal)?
+        }
+        "update_blood_test_metadata" => {
+            let report_id = integer(&args, "report_id")?;
+            let test_date = match args.get("test_date").and_then(Value::as_str) {
+                Some(text) => {
+                    let date = chrono::NaiveDate::parse_from_str(text.trim(), "%Y-%m-%d")
+                        .map_err(|_| (-32602, "test_date must be YYYY-MM-DD.".to_owned()))?;
+                    if date > Utc::now().date_naive() || chrono::Datelike::year(&date) < 1980 {
+                        return Err((
+                            -32602,
+                            "test_date looks wrong; check it with the owner.".into(),
+                        ));
+                    }
+                    Some(date.format("%Y-%m-%d").to_string())
+                }
+                None => None,
+            };
+            let label = bounded_text(args.get("label"), "label", 200).map_err(|e| (-32602, e))?;
+            let confirm = args.get("confirm").and_then(Value::as_bool) == Some(true);
+            let outcome = crate::labedit::update_metadata(
+                &state.db,
+                user.household_id,
+                &user.audit_actor(),
+                report_id,
+                test_date,
+                label,
+                confirm,
+            )
+            .await
+            .map_err(internal)?
+            .map_err(|message| (-32602, message))?;
+            if outcome["applied"] == json!(true) {
+                refresh_lab_insights(state, user.household_id, report_id).await;
+            }
+            outcome
+        }
+        "upsert_blood_test_results" => {
+            let report_id = integer(&args, "report_id")?;
+            let items = args
+                .get("results")
+                .and_then(Value::as_array)
+                .filter(|items| !items.is_empty() && items.len() <= 200)
+                .ok_or((-32602, "results must contain 1 to 200 analytes.".into()))?;
+            let mut parsed = Vec::with_capacity(items.len());
+            for (index, item) in items.iter().enumerate() {
+                let at = |field: &str| format!("results[{index}].{field}");
+                let text = |key: &str, max: usize| {
+                    bounded_text(item.get(key), &at(key), max).map_err(|e| (-32602, e))
+                };
+                let flag = text("flag", 20)?.map(|f| f.to_lowercase());
+                if let Some(f) = &flag
+                    && !matches!(f.as_str(), "high" | "low" | "normal" | "abnormal")
+                {
+                    return Err((
+                        -32602,
+                        format!("{} must be high, low, normal or abnormal.", at("flag")),
+                    ));
+                }
+                parsed.push(crate::labedit::UpsertItem {
+                    result_id: item.get("result_id").and_then(Value::as_i64),
+                    test_name: text("test_name", 120)?
+                        .ok_or((-32602, format!("{} is required.", at("test_name"))))?,
+                    value_text: text("value", 60)?
+                        .ok_or((-32602, format!("{} is required.", at("value"))))?,
+                    unit: text("unit", 40)?,
+                    reference_range: text("reference_range", 80)?,
+                    flag,
+                });
+            }
+            let confirm = args.get("confirm").and_then(Value::as_bool) == Some(true);
+            let outcome = crate::labedit::upsert_results(
+                &state.db,
+                user.household_id,
+                &user.audit_actor(),
+                report_id,
+                parsed,
+                confirm,
+            )
+            .await
+            .map_err(internal)?
+            .map_err(|message| (-32602, message))?;
+            if outcome["applied"] == json!(true) {
+                refresh_lab_insights(state, user.household_id, report_id).await;
+            }
+            outcome
+        }
+        "find_duplicate_blood_tests" => {
+            let pet_id = integer(&args, "pet_id")?;
+            if db::get_pet(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?
+                .is_none()
+            {
+                return Err((-32602, "That pet is not in this household.".into()));
+            }
+            let reports = db::list_lab_reports_unbounded(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?;
+            let pairs = crate::labedit::find_duplicates(&reports);
+            json!({"pet_id": pet_id, "possible_duplicates": pairs, "reports_checked": reports.len()})
+        }
+        "merge_blood_tests" => {
+            let keep = integer(&args, "keep_report_id")?;
+            let remove = integer(&args, "remove_report_id")?;
+            let confirm = args.get("confirm").and_then(Value::as_bool) == Some(true);
+            let outcome = crate::labedit::merge(
+                &state.db,
+                user.household_id,
+                &user.audit_actor(),
+                keep,
+                remove,
+                confirm,
+            )
+            .await
+            .map_err(internal)?
+            .map_err(|message| (-32602, message))?;
+            if outcome["applied"] == json!(true) {
+                refresh_lab_insights(state, user.household_id, keep).await;
+            }
+            outcome
+        }
         "delete_blood_test" => {
             let report_id = integer(&args, "report_id")?;
             let deleted =
@@ -1990,16 +2208,6 @@ fn bounded_text(value: Option<&Value>, field: &str, max: usize) -> Result<Option
 
 /// Numeric value only when the printed value is a plain number
 /// ("1.8", "1,8", "1 234"). Qualified values like "<0.1" stay text-only.
-fn plain_number(value: &str) -> Option<f64> {
-    let cleaned: String = value.chars().filter(|c| !c.is_whitespace()).collect();
-    let cleaned = if cleaned.matches(',').count() == 1 && !cleaned.contains('.') {
-        cleaned.replace(',', ".")
-    } else {
-        cleaned.replace(',', "")
-    };
-    cleaned.parse::<f64>().ok().filter(|n| n.is_finite())
-}
-
 fn parse_blood_test(args: &Value, today: chrono::NaiveDate) -> Result<BloodTestInput, String> {
     if args.get("confirm").and_then(Value::as_bool) != Some(true) {
         return Err("Show the owner the extracted values and ask them to confirm first, then call again with confirm:true.".into());
@@ -2044,13 +2252,27 @@ fn parse_blood_test(args: &Value, today: chrono::NaiveDate) -> Result<BloodTestI
             ));
         }
         results.push(crate::ocr::ParsedLabResult {
-            value_numeric: plain_number(&value_text),
+            value_numeric: None,
+            parse_status: String::new(),
             unit: bounded_text(item.get("unit"), &at("unit"), 40)?,
             reference_range: bounded_text(item.get("reference_range"), &at("reference_range"), 80)?,
             test_name,
             value_text,
             flag,
         });
+    }
+    // Read numbers with the report's own decimal convention, judged from all
+    // of its values and ranges together ("1.096,20" is 1096.2, not 1.096).
+    let locale = crate::labvalue::detect_locale(
+        results
+            .iter()
+            .flat_map(|r| [Some(r.value_text.as_str()), r.reference_range.as_deref()])
+            .flatten(),
+    );
+    for result in &mut results {
+        let number = crate::labvalue::parse(&result.value_text, locale);
+        result.value_numeric = number.value;
+        result.parse_status = number.status.as_str().to_owned();
     }
     Ok(BloodTestInput {
         pet_id,
@@ -2098,6 +2320,29 @@ fn opt_date(args: &Value, key: &str) -> Result<Option<chrono::NaiveDate>, (i32, 
 
 /// Recompute deterministic insights for one pet from current rows.
 /// Pure reads + arithmetic: no model, no network, no diagnosis.
+/// After a lab correction, recompute that pet's findings so no stored
+/// insight still reflects the old values. Failures are logged, not fatal:
+/// the correction itself has already been committed.
+async fn refresh_lab_insights(state: &AppState, household_id: i64, report_id: i64) {
+    let result = async {
+        let Some(report) = crate::labedit::get_report(&state.db, household_id, report_id).await?
+        else {
+            return Ok(());
+        };
+        let Some(pet) = db::get_pet(&state.db, household_id, report.pet_id).await? else {
+            return Ok(());
+        };
+        let findings = recompute_insights(state, household_id, &pet).await?;
+        crate::insights::save_findings(&state.db, &findings).await?;
+        crate::insights::prune_stale_findings(&state.db, household_id, pet.id, &findings).await?;
+        anyhow::Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(%error, "insight refresh after lab edit failed");
+    }
+}
+
 async fn recompute_insights(
     state: &AppState,
     household_id: i64,

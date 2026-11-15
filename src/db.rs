@@ -452,6 +452,7 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
     .await?;
     ensure_google_sub_column(db).await?;
     ensure_column(db, "lab_reports", "original_file", "TEXT").await?;
+    ensure_column(db, "lab_results", "parse_status", "TEXT").await?;
 
     let now = Utc::now().to_rfc3339();
     db.execute(Statement::from_sql_and_values(
@@ -2083,8 +2084,8 @@ async fn insert_lab_report(
     for result in results {
         transaction.execute(Statement::from_sql_and_values(
             DbBackend::Sqlite,
-            "INSERT INTO lab_results(report_id,test_name,value_text,value_numeric,unit,reference_range,flag) VALUES(?,?,?,?,?,?,?)",
-            [report_id.into(), result.test_name.clone().into(), result.value_text.clone().into(), result.value_numeric.into(), result.unit.clone().into(), result.reference_range.clone().into(), result.flag.clone().into()],
+            "INSERT INTO lab_results(report_id,test_name,value_text,value_numeric,unit,reference_range,flag,parse_status) VALUES(?,?,?,?,?,?,?,?)",
+            [report_id.into(), result.test_name.clone().into(), result.value_text.clone().into(), result.value_numeric.into(), result.unit.clone().into(), result.reference_range.clone().into(), result.flag.clone().into(), (!result.parse_status.is_empty()).then(|| result.parse_status.clone()).into()],
         )).await?;
     }
     audit(
@@ -2107,17 +2108,36 @@ pub async fn list_lab_reports(
     household_id: i64,
     pet_id: i64,
 ) -> anyhow::Result<Vec<crate::domain::LabReport>> {
+    lab_reports_for_pet(db, household_id, pet_id, 50).await
+}
+
+/// Every report for one pet; for edits and duplicate checks, which must
+/// see reports beyond the newest 50.
+pub async fn list_lab_reports_unbounded(
+    db: &DatabaseConnection,
+    household_id: i64,
+    pet_id: i64,
+) -> anyhow::Result<Vec<crate::domain::LabReport>> {
+    lab_reports_for_pet(db, household_id, pet_id, i64::MAX).await
+}
+
+async fn lab_reports_for_pet(
+    db: &DatabaseConnection,
+    household_id: i64,
+    pet_id: i64,
+    limit: i64,
+) -> anyhow::Result<Vec<crate::domain::LabReport>> {
     let reports = db.query_all(Statement::from_sql_and_values(
         DbBackend::Sqlite,
-        "SELECT r.id,r.pet_id,p.name,r.source_filename,r.raw_text,r.test_date,r.imported_at,r.parse_status,(r.original_file IS NOT NULL) AS has_original FROM lab_reports r JOIN pets p ON p.id=r.pet_id WHERE r.household_id=? AND r.pet_id=? ORDER BY COALESCE(r.test_date,r.imported_at) DESC LIMIT 50",
-        [household_id.into(), pet_id.into()],
+        "SELECT r.id,r.pet_id,p.name,r.source_filename,r.raw_text,r.test_date,r.imported_at,r.parse_status,(r.original_file IS NOT NULL) AS has_original FROM lab_reports r JOIN pets p ON p.id=r.pet_id WHERE r.household_id=? AND r.pet_id=? ORDER BY COALESCE(r.test_date,r.imported_at) DESC, r.id DESC LIMIT ?",
+        [household_id.into(), pet_id.into(), limit.into()],
     )).await?;
     let mut output = Vec::with_capacity(reports.len());
     for row in reports {
         let report_id: i64 = row.try_get("", "id")?;
         let result_rows = db.query_all(Statement::from_sql_and_values(
             DbBackend::Sqlite,
-            "SELECT id,test_name,value_text,value_numeric,unit,reference_range,flag FROM lab_results WHERE report_id=? ORDER BY id",
+            "SELECT id,test_name,value_text,value_numeric,unit,reference_range,flag,parse_status FROM lab_results WHERE report_id=? ORDER BY id",
             [report_id.into()],
         )).await?;
         let results = result_rows
@@ -2131,6 +2151,7 @@ pub async fn list_lab_reports(
                     unit: result.try_get("", "unit")?,
                     reference_range: result.try_get("", "reference_range")?,
                     flag: result.try_get("", "flag")?,
+                    parse_status: result.try_get("", "parse_status")?,
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -4323,6 +4344,7 @@ mod tests {
             unit: Some("mg/dL".into()),
             reference_range: Some("0.8 - 2.4".into()),
             flag: None,
+            parse_status: "validated".into(),
         }];
         let report_id = record_lab_report(
             &db,
