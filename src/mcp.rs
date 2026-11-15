@@ -350,10 +350,33 @@ pub async fn authorize(
         );
     };
     let state_field = query.state.clone().unwrap_or_default();
-    Ok(Html(format!(
+    let csp = consent_csp(&query.redirect_uri);
+    let mut response = Html(format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Connect Pet Health</title><link rel=\"stylesheet\" href=\"/static/app.css\"></head><body class=\"auth-page\"><main class=\"auth-shell\"><section class=\"auth-panel\"><div class=\"eyebrow\">PET HEALTH / MCP</div><h1>Connect your pet history?</h1><p>This agent will be able to read and update the signed-in household through Pet Health.</p><form method=\"post\" action=\"/oauth/authorize/approve\" class=\"auth-form\"><input type=\"hidden\" name=\"client_id\" value=\"{}\"><input type=\"hidden\" name=\"redirect_uri\" value=\"{}\"><input type=\"hidden\" name=\"code_challenge\" value=\"{}\"><input type=\"hidden\" name=\"state\" value=\"{}\"><button class=\"button primary\" type=\"submit\">Allow access</button></form><p class=\"auth-switch\"><a href=\"/\">Cancel</a></p></section></main></body></html>",
         escape(&query.client_id), escape(&query.redirect_uri), escape(&query.code_challenge), escape(&state_field)
-    )).into_response())
+    )).into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&csp) {
+        response
+            .headers_mut()
+            .insert("content-security-policy", value);
+    }
+    Ok(response)
+}
+
+/// The consent form POSTs to us and we 303 to the client's redirect_uri.
+/// Browsers apply `form-action` to that redirect, so the registered
+/// redirect origin must be allowed or the approval silently goes nowhere.
+fn consent_csp(redirect_uri: &str) -> String {
+    let redirect_origin = reqwest::Url::parse(redirect_uri)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "https" | "http"))
+        .map(|url| url.origin().ascii_serialization())
+        .filter(|origin| origin != "null")
+        .map(|origin| format!(" {origin}"))
+        .unwrap_or_default();
+    format!(
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'{redirect_origin}"
+    )
 }
 
 pub async fn approve_authorize(
@@ -1441,6 +1464,13 @@ async fn recompute_insights(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consent_csp_allows_registered_redirect_origin() {
+        let csp = consent_csp("https://chatgpt.com/connector_platform_oauth_redirect");
+        assert!(csp.ends_with("form-action 'self' https://chatgpt.com"));
+        assert!(consent_csp("javascript:alert(1)").ends_with("form-action 'self'"));
+    }
 
     #[test]
     fn negotiates_known_versions_and_falls_back_to_newest() {

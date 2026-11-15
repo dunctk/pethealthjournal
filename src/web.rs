@@ -2832,6 +2832,11 @@ async fn security_headers(request: Request, next: Next) -> Response {
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     headers.insert("cache-control", HeaderValue::from_static("no-store"));
+    // Handlers may set their own CSP (e.g. OAuth consent, whose form must be
+    // allowed to redirect to the client's registered redirect_uri).
+    if headers.contains_key("content-security-policy") {
+        return response;
+    }
     headers.insert(
         "content-security-policy",
         HeaderValue::from_static("default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"),
