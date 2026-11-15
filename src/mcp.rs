@@ -755,6 +755,8 @@ fn tool_list() -> Value {
         {"name":"record_symptom_event","description":"Record a structured symptom using the user's original wording. The server timestamps it now or by relative minutes_ago; absolute timestamps are not accepted from the model.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"message":{"type":"string"},"symptom":{"type":"string","enum":["vomiting","diarrhea","reduced_appetite"]},"minutes_ago":{"type":"integer","minimum":0,"maximum":525600},"occurrence_count":{"type":"integer","minimum":1,"maximum":100},"amount":{"type":"string"},"contents":{"type":"string"},"meal_relation":{"type":"string"},"water_status":{"type":"string"},"appetite_status":{"type":"string"},"energy_status":{"type":"string"},"pain_status":{"type":"string"},"note":{"type":"string"}},"required":["pet_id","message","symptom"]}},
         {"name":"record_medication","description":"Record a medication exposure. The server timestamps administration now or by relative minutes_ago; include the exact product, active ingredient, strength, dose, route, and whether it was given, missed, extra, or vomited back.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"name":{"type":"string"},"active_ingredient":{"type":"string"},"dose_value":{"type":"number"},"dose_unit":{"type":"string"},"route":{"type":"string"},"minutes_ago":{"type":"integer","minimum":0,"maximum":525600},"status":{"type":"string","enum":["given","missed","extra","vomited_back"]},"message":{"type":"string"}},"required":["pet_id","name"]}},
         {"name":"record_prescription","description":"Save a pet's prescription plan (strength, dose, frequency, instructions). The owner's wording is preserved. CONFIRMATION: if the pet already has an ACTIVE prescription with the same name and different dosing, the call is rejected unless confirm:true is passed after the owner explicitly approves the change.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"name":{"type":"string"},"active_ingredient":{"type":"string"},"concentration_value":{"type":"number"},"concentration_unit":{"type":"string"},"dose_value":{"type":"number"},"dose_unit":{"type":"string"},"frequency":{"type":"string"},"route":{"type":"string"},"instructions":{"type":"string"},"started_days_ago":{"type":"integer","minimum":0,"maximum":36500},"status":{"type":"string","enum":["active","paused","stopped"]},"message":{"type":"string"},"confirm":{"type":"boolean","description":"Set true only after the owner explicitly confirms replacing a differing active prescription.","default":false}},"required":["pet_id","name"]},"annotations":{"destructiveHint":true}},
+        {"name":"update_prescription","description":"Change an EXISTING prescription: stop it, pause it, resume a paused one, or change its dose/frequency. Use this instead of record_prescription when the owner says the vet stopped, paused, or adjusted a medication. Get prescription_id from get_medication_plan. History is kept: a dose change stops the old regimen and creates a new active one. Restate the change to the owner and get their explicit approval before calling with confirm:true.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"prescription_id":{"type":"integer"},"action":{"type":"string","enum":["stop","pause","resume","change_dose"]},"effective_days_ago":{"type":"integer","minimum":0,"maximum":3650,"default":0,"description":"For stop/change_dose: how many days ago it took effect. The server computes the date."},"dose_value":{"type":"number","exclusiveMinimum":0},"dose_unit":{"type":"string","maxLength":40},"frequency":{"type":"string","maxLength":120},"concentration_value":{"type":"number","exclusiveMinimum":0},"concentration_unit":{"type":"string","maxLength":40},"instructions":{"type":"string","maxLength":1000},"message":{"type":"string","minLength":1,"maxLength":1000,"description":"The owner's exact words; preserved on the timeline."},"confirm":{"type":"boolean","description":"Must be true, only after the owner explicitly approved this change."}},"required":["pet_id","prescription_id","action","message","confirm"]},"annotations":{"destructiveHint":true}},
+        {"name":"undo_medication_entry","description":"Delete one mistaken medication record: a dose logged with record_medication (entry_type 'dose', id = medication_id) or an adherence record from record_medication_adherence (entry_type 'adherence', id = adherence_id). Prescriptions are changed with update_prescription instead. Only call when the owner asks to remove that entry.","inputSchema":{"type":"object","properties":{"entry_type":{"type":"string","enum":["dose","adherence"]},"id":{"type":"integer"}},"required":["entry_type","id"]},"annotations":{"destructiveHint":true}},
         {"name":"record_medication_adherence","description":"Record whether a scheduled prescription dose was given, partial, missed, or unknown. Use days_ago for a past calendar day; the server chooses the date.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"prescription_id":{"type":"integer"},"days_ago":{"type":"integer","minimum":0,"maximum":36500},"actual_dose_value":{"type":"number"},"actual_dose_unit":{"type":"string"},"status":{"type":"string","enum":["given","partial","missed","unknown"]},"reason":{"type":"string"},"message":{"type":"string"}},"required":["pet_id","prescription_id","status"]}},
         {"name":"record_blood_test","description":"Save blood-test (lab) results for a pet, e.g. from a photo or PDF of a vet lab report the owner shared with you. You read the report yourself; no server-side OCR runs. WORKFLOW: 1) call list_pets to get pet_id; 2) transcribe EVERY analyte exactly as printed (name, value, unit, reference range, H/L flag) plus the report's collection/test date; 3) show the owner the extracted table and ask them to confirm or correct it; 4) only then call this tool with confirm:true. Do not convert units, round, infer missing values or interpret results. If the photo is unreadable or the date is missing, ask the owner instead of guessing.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"test_date":{"type":"string","description":"Date the sample was collected/tested as printed on the report, YYYY-MM-DD. Not today's date unless the report says so."},"lab_name":{"type":"string","maxLength":120,"description":"Clinic or laboratory name, if printed."},"panel":{"type":"string","maxLength":120,"description":"Panel/report title if printed, e.g. 'Biochemistry', 'CBC', 'SDMA'."},"transcription":{"type":"string","maxLength":20000,"description":"Verbatim text of the report as you read it, kept as the source record."},"results":{"type":"array","minItems":1,"maxItems":200,"items":{"type":"object","properties":{"test_name":{"type":"string","maxLength":120,"description":"Analyte exactly as printed, e.g. 'CREA', 'ALT', 'SDMA'."},"value":{"type":"string","maxLength":60,"description":"Value exactly as printed, e.g. '1.8', '<0.1', '>500', 'Positive'."},"unit":{"type":"string","maxLength":40},"reference_range":{"type":"string","maxLength":80,"description":"As printed, e.g. '0.8 - 2.4'."},"flag":{"type":"string","enum":["high","low","normal","abnormal"],"description":"Only if the report marks it (H/L/*). Omit otherwise."}},"required":["test_name","value"]}},"confirm":{"type":"boolean","description":"Must be true, and only after the owner reviewed and approved the extracted values."}},"required":["pet_id","test_date","results","confirm"]}},
         {"name":"delete_blood_test","description":"Delete one saved blood-test report and all its values, e.g. to correct a mistaken transcription. Only call after the owner explicitly asks.","inputSchema":{"type":"object","properties":{"report_id":{"type":"integer"}},"required":["report_id"]},"annotations":{"destructiveHint":true}},
@@ -1273,6 +1275,74 @@ async fn call_tool(
             .map_err(internal)?;
             serde_json::to_value(imported.iter().map(|item| json!({"filename":item.filename,"report_id":item.report_id,"message":item.message})).collect::<Vec<_>>()).map_err(internal)?
         }
+        "update_prescription" => {
+            let pet_id = integer(&args, "pet_id")?;
+            let pet = db::get_pet(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?
+                .ok_or((-32602, "That pet is not in this household.".into()))?;
+            let prescription_id = integer(&args, "prescription_id")?;
+            let current =
+                db::get_prescription(&state.db, user.household_id, pet.id, prescription_id)
+                    .await
+                    .map_err(internal)?
+                    .ok_or((
+                        -32602,
+                        "That prescription is not on this pet's plan.".into(),
+                    ))?;
+            let request =
+                parse_prescription_change(&args, &current.status, Utc::now().date_naive())
+                    .map_err(|m| (-32602, m))?;
+            let update = db::update_prescription(
+                &state.db,
+                user.household_id,
+                &user.audit_actor(),
+                &pet,
+                prescription_id,
+                &current.status,
+                &request.change,
+                &request.message,
+            )
+            .await
+            .map_err(internal)?
+            .ok_or((
+                -32602,
+                "The prescription changed meanwhile. Call get_medication_plan and try again."
+                    .into(),
+            ))?;
+            json!({
+                "pet": pet.name,
+                "medication": current.name,
+                "action": request.action,
+                "previous_prescription_id": update.previous_prescription_id,
+                "current_prescription_id": update.current_prescription_id,
+                "previous_status": update.previous_status,
+                "new_status": update.new_status,
+                "timeline_event_id": update.event_id,
+                "note": "Recorded as the owner reported it. This is a record, not a dosing recommendation."
+            })
+        }
+        "undo_medication_entry" => {
+            let entry_type = string(&args, "entry_type")?;
+            if !matches!(entry_type.as_str(), "dose" | "adherence") {
+                return Err((-32602, "entry_type must be 'dose' or 'adherence'.".into()));
+            }
+            let id = integer(&args, "id")?;
+            let removed = db::delete_medication_entry(
+                &state.db,
+                user.household_id,
+                &user.audit_actor(),
+                &entry_type,
+                id,
+            )
+            .await
+            .map_err(internal)?
+            .ok_or((
+                -32602,
+                "That medication entry is not in this household.".into(),
+            ))?;
+            json!({"deleted": true, "entry_type": entry_type, "removed": removed})
+        }
         "record_blood_test" => {
             let input =
                 parse_blood_test(&args, Utc::now().date_naive()).map_err(|m| (-32602, m))?;
@@ -1431,6 +1501,94 @@ fn tool_result(value: Value) -> Result<Value, (i32, String)> {
     Ok(
         json!({"content":[{"type":"text","text":serde_json::to_string_pretty(&structured).map_err(internal)?}],"structuredContent":structured,"isError":false}),
     )
+}
+
+#[derive(Debug)]
+struct PrescriptionChangeRequest {
+    action: String,
+    message: String,
+    change: db::PrescriptionChange,
+}
+
+/// Validates an update_prescription call against the prescription's current
+/// status. Dates are computed from day offsets; the model never supplies one.
+fn parse_prescription_change(
+    args: &Value,
+    current_status: &str,
+    today: chrono::NaiveDate,
+) -> Result<PrescriptionChangeRequest, String> {
+    if args.get("confirm").and_then(Value::as_bool) != Some(true) {
+        return Err("Restate the change to the owner, get explicit approval, then call again with confirm:true.".into());
+    }
+    let message = bounded_text(args.get("message"), "message", 1000)?
+        .ok_or("message (the owner's words) is required.")?;
+    let action = args
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or("action is required.")?
+        .to_owned();
+    let days_ago = args
+        .get("effective_days_ago")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    if !(0..=3650).contains(&days_ago) {
+        return Err("effective_days_ago must be 0 to 3650.".into());
+    }
+    let effective_on = today - Duration::days(days_ago);
+    let positive = |key: &str| -> Result<Option<f64>, String> {
+        match args.get(key).filter(|v| !v.is_null()) {
+            None => Ok(None),
+            Some(v) => v
+                .as_f64()
+                .filter(|n| n.is_finite() && *n > 0.0)
+                .map(Some)
+                .ok_or(format!("{key} must be a positive number.")),
+        }
+    };
+    let change = match (action.as_str(), current_status) {
+        ("stop", "active" | "paused") => db::PrescriptionChange::Stop {
+            ended_on: effective_on,
+        },
+        ("pause", "active") => db::PrescriptionChange::Pause,
+        ("resume", "paused") => db::PrescriptionChange::Resume,
+        ("change_dose", "active") => {
+            let change = db::PrescriptionChange::ChangeDose {
+                dose_value: positive("dose_value")?,
+                dose_unit: bounded_text(args.get("dose_unit"), "dose_unit", 40)?,
+                frequency: bounded_text(args.get("frequency"), "frequency", 120)?,
+                concentration_value: positive("concentration_value")?,
+                concentration_unit: bounded_text(
+                    args.get("concentration_unit"),
+                    "concentration_unit",
+                    40,
+                )?,
+                instructions: bounded_text(args.get("instructions"), "instructions", 1000)?,
+                effective_on,
+            };
+            if let db::PrescriptionChange::ChangeDose {
+                dose_value: None,
+                dose_unit: None,
+                frequency: None,
+                concentration_value: None,
+                concentration_unit: None,
+                instructions: None,
+                ..
+            } = change
+            {
+                return Err("change_dose needs at least one new value (dose, unit, frequency, concentration or instructions).".into());
+            }
+            change
+        }
+        ("stop" | "pause" | "resume" | "change_dose", status) => {
+            return Err(format!("Cannot {action} a prescription that is {status}."));
+        }
+        _ => return Err("action must be stop, pause, resume or change_dose.".into()),
+    };
+    Ok(PrescriptionChangeRequest {
+        action,
+        message,
+        change,
+    })
 }
 
 /// A validated blood-test transcription supplied by an MCP client.
@@ -1759,6 +1917,33 @@ mod tests {
     }
 
     #[test]
+    fn prescription_change_enforces_confirmation_and_valid_transitions() {
+        let today = day("2026-11-15");
+        let base = json!({"pet_id":1,"prescription_id":2,"action":"stop","message":"Vet stopped it","confirm":true,"effective_days_ago":3});
+        let ok = parse_prescription_change(&base, "active", today).unwrap();
+        assert!(
+            matches!(ok.change, db::PrescriptionChange::Stop { ended_on } if ended_on == day("2026-11-12"))
+        );
+        let mut unconfirmed = base.clone();
+        unconfirmed["confirm"] = json!(false);
+        assert!(parse_prescription_change(&unconfirmed, "active", today).is_err());
+        assert!(
+            parse_prescription_change(&base, "stopped", today)
+                .unwrap_err()
+                .contains("stopped")
+        );
+        let resume = json!({"pet_id":1,"prescription_id":2,"action":"resume","message":"Back on it","confirm":true});
+        assert!(parse_prescription_change(&resume, "active", today).is_err());
+        assert!(parse_prescription_change(&resume, "paused", today).is_ok());
+        let empty_change = json!({"pet_id":1,"prescription_id":2,"action":"change_dose","message":"Change","confirm":true});
+        assert!(parse_prescription_change(&empty_change, "active", today).is_err());
+        let bad_dose = json!({"pet_id":1,"prescription_id":2,"action":"change_dose","message":"Change","confirm":true,"dose_value":-1});
+        assert!(parse_prescription_change(&bad_dose, "active", today).is_err());
+        let far = json!({"pet_id":1,"prescription_id":2,"action":"stop","message":"x","confirm":true,"effective_days_ago":5000});
+        assert!(parse_prescription_change(&far, "active", today).is_err());
+    }
+
+    #[test]
     fn structured_content_is_always_an_object() {
         let wrapped = tool_result(json!([{"id":1,"name":"Velcro"}])).unwrap();
         assert_eq!(wrapped["structuredContent"]["items"][0]["name"], "Velcro");
@@ -1803,6 +1988,8 @@ mod tests {
             "record_weight",
             "record_blood_test",
             "delete_blood_test",
+            "update_prescription",
+            "undo_medication_entry",
         ] {
             assert!(names.contains(&required), "missing tool: {required}");
         }

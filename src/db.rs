@@ -2317,6 +2317,320 @@ pub async fn confirm_medication_plan_stop(
     })
 }
 
+/// An owner-confirmed change to one existing prescription, requested by an
+/// MCP client. Dates are server-computed from relative day offsets.
+#[derive(Clone, Debug)]
+pub enum PrescriptionChange {
+    Stop {
+        ended_on: NaiveDate,
+    },
+    Pause,
+    Resume,
+    ChangeDose {
+        dose_value: Option<f64>,
+        dose_unit: Option<String>,
+        frequency: Option<String>,
+        concentration_value: Option<f64>,
+        concentration_unit: Option<String>,
+        instructions: Option<String>,
+        effective_on: NaiveDate,
+    },
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PrescriptionUpdate {
+    pub previous_prescription_id: i64,
+    pub current_prescription_id: i64,
+    pub previous_status: String,
+    pub new_status: String,
+    pub event_id: i64,
+}
+
+/// Applies one owner-confirmed prescription change atomically and keeps
+/// history: a dose change stops the old row and creates a new active row that
+/// carries the unchanged fields. The update is guarded on the status the
+/// caller observed, so a concurrent change yields `None` instead of a
+/// silent overwrite. A timeline event preserves the owner's wording.
+pub async fn update_prescription(
+    db: &DatabaseConnection,
+    household_id: i64,
+    actor: &str,
+    pet: &Pet,
+    prescription_id: i64,
+    expected_status: &str,
+    change: &PrescriptionChange,
+    raw_input: &str,
+) -> anyhow::Result<Option<PrescriptionUpdate>> {
+    let now = Utc::now();
+    let now_text = now.to_rfc3339();
+    let transaction = db.begin().await?;
+    let Some(row) = transaction
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            r#"SELECT m.*,p.name AS pet_name FROM medication_prescriptions m
+               JOIN pets p ON p.id=m.pet_id
+               WHERE m.household_id=? AND m.pet_id=? AND m.id=? AND m.status=?"#,
+            [
+                household_id.into(),
+                pet.id.into(),
+                prescription_id.into(),
+                expected_status.into(),
+            ],
+        ))
+        .await?
+    else {
+        return Ok(None);
+    };
+    let current = prescription_from_row(row)?;
+    let (new_status, ended_on, concept, summary, occurred_on) = match change {
+        PrescriptionChange::Stop { ended_on } => (
+            "stopped",
+            Some(ended_on.to_string()),
+            "medication_plan_stop",
+            format!("Stopped {}", current.name),
+            *ended_on,
+        ),
+        PrescriptionChange::Pause => (
+            "paused",
+            None,
+            "medication_plan_pause",
+            format!("Paused {}", current.name),
+            now.date_naive(),
+        ),
+        PrescriptionChange::Resume => (
+            "active",
+            None,
+            "medication_plan_resume",
+            format!("Resumed {}", current.name),
+            now.date_naive(),
+        ),
+        PrescriptionChange::ChangeDose { effective_on, .. } => (
+            "stopped",
+            Some(effective_on.to_string()),
+            "medication_plan_change",
+            String::new(),
+            *effective_on,
+        ),
+    };
+    transaction
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            r#"UPDATE medication_prescriptions SET status=?,ended_on=COALESCE(?,ended_on),updated_at=?
+               WHERE household_id=? AND id=?"#,
+            [
+                new_status.into(),
+                ended_on.into(),
+                now_text.clone().into(),
+                household_id.into(),
+                prescription_id.into(),
+            ],
+        ))
+        .await?;
+    let audit_action = match change {
+        PrescriptionChange::Stop { .. } | PrescriptionChange::ChangeDose { .. } => {
+            "medication.prescription.stopped"
+        }
+        PrescriptionChange::Pause => "medication.prescription.paused",
+        PrescriptionChange::Resume => "medication.prescription.resumed",
+    };
+    audit(
+        &transaction,
+        household_id,
+        actor,
+        audit_action,
+        "medication_prescription",
+        prescription_id,
+        raw_input,
+        &now_text,
+    )
+    .await?;
+
+    let mut current_id = prescription_id;
+    let mut summary = summary;
+    let mut result_status = new_status.to_owned();
+    if let PrescriptionChange::ChangeDose {
+        dose_value,
+        dose_unit,
+        frequency,
+        concentration_value,
+        concentration_unit,
+        instructions,
+        effective_on,
+    } = change
+    {
+        let dose_value = dose_value.or(current.dose_value);
+        let dose_unit = dose_unit.clone().or(current.dose_unit.clone());
+        let frequency = frequency.clone().or(current.frequency.clone());
+        let new_row = transaction
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                r#"INSERT INTO medication_prescriptions
+                   (household_id,pet_id,name,active_ingredient,concentration_value,concentration_unit,dose_value,dose_unit,frequency,route,instructions,started_on,status,raw_input,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id"#,
+                [
+                    household_id.into(),
+                    pet.id.into(),
+                    current.name.clone().into(),
+                    current.active_ingredient.clone().into(),
+                    concentration_value.or(current.concentration_value).into(),
+                    concentration_unit
+                        .clone()
+                        .or(current.concentration_unit.clone())
+                        .into(),
+                    dose_value.into(),
+                    dose_unit.clone().into(),
+                    frequency.clone().into(),
+                    current.route.clone().into(),
+                    instructions.clone().or(current.instructions.clone()).into(),
+                    effective_on.to_string().into(),
+                    "active".into(),
+                    raw_input.into(),
+                    now_text.clone().into(),
+                    now_text.clone().into(),
+                ],
+            ))
+            .await?
+            .ok_or_else(|| anyhow!("prescription insert returned no id"))?;
+        current_id = new_row.try_get("", "id")?;
+        audit(
+            &transaction,
+            household_id,
+            actor,
+            "medication.prescription.created",
+            "medication_prescription",
+            current_id,
+            raw_input,
+            &now_text,
+        )
+        .await?;
+        let dose = [dose_value.map(|v| v.to_string()), dose_unit, frequency]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ");
+        summary = format!("Changed {} to {dose}", current.name);
+        result_status = "active".into();
+    }
+
+    let occurred_at = if occurred_on == now.date_naive() {
+        now_text.clone()
+    } else {
+        occurred_on
+            .and_hms_opt(12, 0, 0)
+            .ok_or_else(|| anyhow!("invalid date"))?
+            .and_utc()
+            .to_rfc3339()
+    };
+    let event_row = transaction
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            r#"INSERT INTO health_events
+               (household_id,pet_id,event_type,concept,summary,raw_input,details,occurred_at,recorded_at,temporal_precision,source)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?) RETURNING id"#,
+            [
+                household_id.into(),
+                pet.id.into(),
+                "medication".into(),
+                concept.into(),
+                summary.into(),
+                raw_input.into(),
+                "Owner-confirmed prescription update via MCP.".into(),
+                occurred_at.into(),
+                now_text.clone().into(),
+                (if occurred_on == now.date_naive() { "confirmed_now" } else { "day" }).into(),
+                "mcp".into(),
+            ],
+        ))
+        .await?
+        .ok_or_else(|| anyhow!("prescription update event insert returned no id"))?;
+    let event_id: i64 = event_row.try_get("", "id")?;
+    audit(
+        &transaction,
+        household_id,
+        actor,
+        "event.created",
+        "health_event",
+        event_id,
+        raw_input,
+        &now_text,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(Some(PrescriptionUpdate {
+        previous_prescription_id: prescription_id,
+        current_prescription_id: current_id,
+        previous_status: current.status,
+        new_status: result_status,
+        event_id,
+    }))
+}
+
+/// Deletes one mistaken medication dose (`medication_administrations`) or
+/// adherence record, household-scoped. The audit row keeps a JSON snapshot of
+/// what was removed. Returns that snapshot, or `None` if not found.
+pub async fn delete_medication_entry(
+    db: &DatabaseConnection,
+    household_id: i64,
+    actor: &str,
+    entry_type: &str,
+    entry_id: i64,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let (table, record_type, action) = match entry_type {
+        "dose" => (
+            "medication_administrations",
+            "medication_administration",
+            "medication.deleted",
+        ),
+        "adherence" => (
+            "medication_adherence",
+            "medication_adherence",
+            "medication.adherence.deleted",
+        ),
+        _ => return Err(anyhow!("unsupported medication entry type")),
+    };
+    let now = Utc::now().to_rfc3339();
+    let transaction = db.begin().await?;
+    let snapshot_sql = match entry_type {
+        "dose" => {
+            "SELECT json_object('id',id,'pet_id',pet_id,'name',name,'dose_value',dose_value,'dose_unit',dose_unit,'status',status,'administered_at',administered_at,'raw_input',raw_input) AS snapshot FROM medication_administrations WHERE household_id=? AND id=?"
+        }
+        _ => {
+            "SELECT json_object('id',id,'pet_id',pet_id,'prescription_id',prescription_id,'scheduled_for',scheduled_for,'status',status,'actual_dose_value',actual_dose_value,'actual_dose_unit',actual_dose_unit,'reason',reason,'raw_input',raw_input) AS snapshot FROM medication_adherence WHERE household_id=? AND id=?"
+        }
+    };
+    let Some(row) = transaction
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            snapshot_sql,
+            [household_id.into(), entry_id.into()],
+        ))
+        .await?
+    else {
+        return Ok(None);
+    };
+    let snapshot: String = row.try_get("", "snapshot")?;
+    transaction
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            &format!("DELETE FROM {table} WHERE household_id=? AND id=?"),
+            [household_id.into(), entry_id.into()],
+        ))
+        .await?;
+    audit(
+        &transaction,
+        household_id,
+        actor,
+        action,
+        record_type,
+        entry_id,
+        &snapshot,
+        &now,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(Some(serde_json::from_str(&snapshot)?))
+}
+
 pub async fn create_medication_adherence(
     db: &DatabaseConnection,
     household_id: i64,
@@ -3231,6 +3545,199 @@ mod tests {
         let db = connect("sqlite::memory:").await.unwrap();
         migrate(&db).await.unwrap();
         db
+    }
+
+    #[tokio::test]
+    async fn updates_prescription_keeping_history_and_undoes_entries_in_scope() {
+        let db = test_db().await;
+        let pet_id = create_pet(&db, 1, "user:1", "Velcro", "Cat", None, None)
+            .await
+            .unwrap();
+        let pet = get_pet(&db, 1, pet_id).await.unwrap().unwrap();
+        let original = create_medication_prescription(
+            &db,
+            1,
+            "user:1",
+            &pet,
+            "Semintra",
+            Some("telmisartan"),
+            Some(4.0),
+            Some("mg/ml"),
+            Some(0.35),
+            Some("ml"),
+            Some("once daily"),
+            Some("oral"),
+            None,
+            Some("2026-10-01"),
+            "active",
+            Some("On Semintra"),
+        )
+        .await
+        .unwrap();
+        let today = Utc::now().date_naive();
+
+        // Pause then resume, guarded on the observed status.
+        let paused = update_prescription(
+            &db,
+            1,
+            "user:1",
+            &pet,
+            original,
+            "active",
+            &PrescriptionChange::Pause,
+            "Pausing",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(paused.new_status, "paused");
+        assert!(
+            update_prescription(
+                &db,
+                1,
+                "user:1",
+                &pet,
+                original,
+                "active",
+                &PrescriptionChange::Pause,
+                "again"
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        update_prescription(
+            &db,
+            1,
+            "user:1",
+            &pet,
+            original,
+            "paused",
+            &PrescriptionChange::Resume,
+            "Back on",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Dose change: old row stopped, new active row carries unchanged fields.
+        let changed = update_prescription(
+            &db,
+            1,
+            "user:1",
+            &pet,
+            original,
+            "active",
+            &PrescriptionChange::ChangeDose {
+                dose_value: Some(0.5),
+                dose_unit: None,
+                frequency: None,
+                concentration_value: None,
+                concentration_unit: None,
+                instructions: None,
+                effective_on: today,
+            },
+            "Vet upped it to 0.5 ml",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_ne!(changed.current_prescription_id, original);
+        let old = get_prescription(&db, 1, pet_id, original)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(old.status, "stopped");
+        assert_eq!(old.ended_on.as_deref(), Some(today.to_string().as_str()));
+        let new = get_prescription(&db, 1, pet_id, changed.current_prescription_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(new.status, "active");
+        assert_eq!(new.dose_value, Some(0.5));
+        assert_eq!(new.dose_unit.as_deref(), Some("ml"));
+        assert_eq!(new.frequency.as_deref(), Some("once daily"));
+        assert_eq!(new.concentration_value, Some(4.0));
+        assert_eq!(new.route.as_deref(), Some("oral"));
+
+        // Another household cannot touch it.
+        assert!(
+            update_prescription(
+                &db,
+                2,
+                "user:2",
+                &pet,
+                changed.current_prescription_id,
+                "active",
+                &PrescriptionChange::Stop { ended_on: today },
+                "x"
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+
+        // Undo a dose and an adherence entry; other households cannot.
+        let dose = create_medication_administration(
+            &db,
+            1,
+            "user:1",
+            &pet,
+            "Cerenia",
+            None,
+            Some(1.0),
+            Some("tablet"),
+            None,
+            Utc::now(),
+            None,
+            "given",
+            Some("Gave Cerenia"),
+        )
+        .await
+        .unwrap();
+        let adherence = create_medication_adherence(
+            &db,
+            1,
+            "user:1",
+            &pet,
+            &new,
+            &today.to_string(),
+            None,
+            None,
+            "given",
+            None,
+            Some("Given"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            delete_medication_entry(&db, 2, "user:2", "dose", dose)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let removed = delete_medication_entry(&db, 1, "user:1", "dose", dose)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(removed["name"], "Cerenia");
+        assert!(
+            delete_medication_entry(&db, 1, "user:1", "dose", dose)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            delete_medication_entry(&db, 1, "user:1", "adherence", adherence)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            delete_medication_entry(&db, 1, "user:1", "prescription", original)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
