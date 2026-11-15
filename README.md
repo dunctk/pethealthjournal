@@ -32,7 +32,7 @@ For two-date comparisons, the owner can select any two photos and request a caut
 
 ## Weights and blood tests
 
-The console keeps a dated weight history for each pet. Blood-test files are stored under a private household directory beneath `BLOOD_TESTS_DIR` (local default: `./example_blood_tests`; production compose default: `/persistent/blood_tests`). The web console can upload a PDF or image directly, and Syncthing can place files in the matching household directory. The owner then chooses **Import new tests**, or calls the MCP `upload_blood_test` / `import_blood_tests` tools.
+The console keeps a dated weight history for each pet. Blood-test files are stored under a private household directory beneath `BLOOD_TESTS_DIR` (local default: `./example_blood_tests`; production compose default: `/persistent/blood_tests`). The web console can upload a PDF or image directly, and Syncthing can place files in the matching household directory. The owner then chooses **Import new tests**, or calls the MCP `upload_blood_test` / `import_blood_tests` tools. From ChatGPT or Claude, the owner can instead attach a photo of the report: the assistant reads it, shows the extracted values for confirmation, then calls `record_blood_test` (no server-side OCR or model call). `delete_blood_test` removes a mistaken report.
 
 Imports use Mistral OCR 4 (`mistral-ocr-4-0`) with block and table extraction. The OCR text is stored alongside parsed test name, value, unit, reference range, flag, and test date. Spanish and English labels are accepted, and the original OCR text remains available for review when a row cannot be parsed. Set `MISTRAL_API_KEY` in the environment or local `.env`; never commit that file.
 

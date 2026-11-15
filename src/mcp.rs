@@ -756,7 +756,9 @@ fn tool_list() -> Value {
         {"name":"record_medication","description":"Record a medication exposure. The server timestamps administration now or by relative minutes_ago; include the exact product, active ingredient, strength, dose, route, and whether it was given, missed, extra, or vomited back.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"name":{"type":"string"},"active_ingredient":{"type":"string"},"dose_value":{"type":"number"},"dose_unit":{"type":"string"},"route":{"type":"string"},"minutes_ago":{"type":"integer","minimum":0,"maximum":525600},"status":{"type":"string","enum":["given","missed","extra","vomited_back"]},"message":{"type":"string"}},"required":["pet_id","name"]}},
         {"name":"record_prescription","description":"Save a pet's prescription plan (strength, dose, frequency, instructions). The owner's wording is preserved. CONFIRMATION: if the pet already has an ACTIVE prescription with the same name and different dosing, the call is rejected unless confirm:true is passed after the owner explicitly approves the change.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"name":{"type":"string"},"active_ingredient":{"type":"string"},"concentration_value":{"type":"number"},"concentration_unit":{"type":"string"},"dose_value":{"type":"number"},"dose_unit":{"type":"string"},"frequency":{"type":"string"},"route":{"type":"string"},"instructions":{"type":"string"},"started_days_ago":{"type":"integer","minimum":0,"maximum":36500},"status":{"type":"string","enum":["active","paused","stopped"]},"message":{"type":"string"},"confirm":{"type":"boolean","description":"Set true only after the owner explicitly confirms replacing a differing active prescription.","default":false}},"required":["pet_id","name"]},"annotations":{"destructiveHint":true}},
         {"name":"record_medication_adherence","description":"Record whether a scheduled prescription dose was given, partial, missed, or unknown. Use days_ago for a past calendar day; the server chooses the date.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"prescription_id":{"type":"integer"},"days_ago":{"type":"integer","minimum":0,"maximum":36500},"actual_dose_value":{"type":"number"},"actual_dose_unit":{"type":"string"},"status":{"type":"string","enum":["given","partial","missed","unknown"]},"reason":{"type":"string"},"message":{"type":"string"}},"required":["pet_id","prescription_id","status"]}},
-        {"name":"upload_blood_test","description":"Store one PDF or image in this household's private area and import it with Mistral OCR 4.","inputSchema":{"type":"object","properties":{"filename":{"type":"string"},"content_base64":{"type":"string","description":"The PDF or image bytes encoded as base64."}},"required":["filename","content_base64"]}},
+        {"name":"record_blood_test","description":"Save blood-test (lab) results for a pet, e.g. from a photo or PDF of a vet lab report the owner shared with you. You read the report yourself; no server-side OCR runs. WORKFLOW: 1) call list_pets to get pet_id; 2) transcribe EVERY analyte exactly as printed (name, value, unit, reference range, H/L flag) plus the report's collection/test date; 3) show the owner the extracted table and ask them to confirm or correct it; 4) only then call this tool with confirm:true. Do not convert units, round, infer missing values or interpret results. If the photo is unreadable or the date is missing, ask the owner instead of guessing.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"test_date":{"type":"string","description":"Date the sample was collected/tested as printed on the report, YYYY-MM-DD. Not today's date unless the report says so."},"lab_name":{"type":"string","maxLength":120,"description":"Clinic or laboratory name, if printed."},"panel":{"type":"string","maxLength":120,"description":"Panel/report title if printed, e.g. 'Biochemistry', 'CBC', 'SDMA'."},"transcription":{"type":"string","maxLength":20000,"description":"Verbatim text of the report as you read it, kept as the source record."},"results":{"type":"array","minItems":1,"maxItems":200,"items":{"type":"object","properties":{"test_name":{"type":"string","maxLength":120,"description":"Analyte exactly as printed, e.g. 'CREA', 'ALT', 'SDMA'."},"value":{"type":"string","maxLength":60,"description":"Value exactly as printed, e.g. '1.8', '<0.1', '>500', 'Positive'."},"unit":{"type":"string","maxLength":40},"reference_range":{"type":"string","maxLength":80,"description":"As printed, e.g. '0.8 - 2.4'."},"flag":{"type":"string","enum":["high","low","normal","abnormal"],"description":"Only if the report marks it (H/L/*). Omit otherwise."}},"required":["test_name","value"]}},"confirm":{"type":"boolean","description":"Must be true, and only after the owner reviewed and approved the extracted values."}},"required":["pet_id","test_date","results","confirm"]}},
+        {"name":"delete_blood_test","description":"Delete one saved blood-test report and all its values, e.g. to correct a mistaken transcription. Only call after the owner explicitly asks.","inputSchema":{"type":"object","properties":{"report_id":{"type":"integer"}},"required":["report_id"]},"annotations":{"destructiveHint":true}},
+        {"name":"upload_blood_test","description":"For clients that can send raw file bytes only: store one PDF or image and import it with server-side Mistral OCR. If you can read the report yourself (e.g. a photo the user attached in chat), use record_blood_test instead.","inputSchema":{"type":"object","properties":{"filename":{"type":"string"},"content_base64":{"type":"string","description":"The PDF or image bytes encoded as base64."}},"required":["filename","content_base64"]}},
         {"name":"import_blood_tests","description":"OCR new PDF and image files from this household's private blood-test folder using Mistral OCR 4.","inputSchema":{"type":"object","properties":{} }},
         {"name":"record_observation","description":"PREFERRED neutral write path: save a general note using the owner's exact words (1-1000 chars). No model is called; the server timestamps it now or by relative minutes_ago. Use this when you (the assistant) have already interpreted the user's request.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"message":{"type":"string","description":"The owner's exact words; preserved verbatim.","minLength":1,"maxLength":1000},"minutes_ago":{"type":"integer","minimum":0,"maximum":525600},"summary":{"type":"string","description":"Short label, max ~280 chars. Defaults to 'Observation recorded'."},"note":{"type":"string","description":"Optional extra detail."}},"required":["pet_id","message"]}},
         {"name":"record_health_event","description":"Legacy free-text capture. May invoke an additional server-side LLM even when the MCP client is ChatGPT or Claude. Prefer specific structured record_* tools or record_observation to avoid duplicate inference.","inputSchema":{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}},
@@ -1271,6 +1273,67 @@ async fn call_tool(
             .map_err(internal)?;
             serde_json::to_value(imported.iter().map(|item| json!({"filename":item.filename,"report_id":item.report_id,"message":item.message})).collect::<Vec<_>>()).map_err(internal)?
         }
+        "record_blood_test" => {
+            let input =
+                parse_blood_test(&args, Utc::now().date_naive()).map_err(|m| (-32602, m))?;
+            let pet = db::get_pet(&state.db, user.household_id, input.pet_id)
+                .await
+                .map_err(internal)?
+                .ok_or((-32602, "That pet is not in this household.".into()))?;
+            let hash = input.content_hash();
+            if db::report_hash_exists(&state.db, user.household_id, &hash)
+                .await
+                .map_err(internal)?
+            {
+                return Err((
+                    -32602,
+                    "These exact results are already saved for this pet and date. Use get_blood_test_history to view them.".into(),
+                ));
+            }
+            let report_id = db::record_lab_report(
+                &state.db,
+                user.household_id,
+                &user.audit_actor(),
+                pet.id,
+                &input.source_label(),
+                &hash,
+                &input.raw_text(),
+                &input.test_date,
+                &input.results,
+            )
+            .await
+            .map_err(internal)?;
+            json!({
+                "report_id": report_id,
+                "pet_id": pet.id,
+                "pet_name": pet.name,
+                "test_date": input.test_date,
+                "saved_results": input.results.len(),
+                "results": input.results.iter().map(|r| json!({
+                    "test_name": r.test_name,
+                    "value": r.value_text,
+                    "value_numeric": r.value_numeric,
+                    "unit": r.unit,
+                    "reference_range": r.reference_range,
+                    "flag": r.flag,
+                })).collect::<Vec<_>>(),
+                "note": "Saved as transcribed and confirmed by the owner. These are records, not a diagnosis."
+            })
+        }
+        "delete_blood_test" => {
+            let report_id = integer(&args, "report_id")?;
+            let deleted =
+                db::delete_lab_report(&state.db, user.household_id, &user.audit_actor(), report_id)
+                    .await
+                    .map_err(internal)?;
+            if !deleted {
+                return Err((
+                    -32602,
+                    "That blood-test report is not in this household.".into(),
+                ));
+            }
+            json!({"deleted": true, "report_id": report_id})
+        }
         "import_blood_tests" => {
             let pets = db::list_pets(&state.db, user.household_id)
                 .await
@@ -1368,6 +1431,160 @@ fn tool_result(value: Value) -> Result<Value, (i32, String)> {
     Ok(
         json!({"content":[{"type":"text","text":serde_json::to_string_pretty(&structured).map_err(internal)?}],"structuredContent":structured,"isError":false}),
     )
+}
+
+/// A validated blood-test transcription supplied by an MCP client.
+#[derive(Debug)]
+struct BloodTestInput {
+    pet_id: i64,
+    test_date: String,
+    lab_name: Option<String>,
+    panel: Option<String>,
+    transcription: Option<String>,
+    results: Vec<crate::ocr::ParsedLabResult>,
+}
+
+impl BloodTestInput {
+    fn source_label(&self) -> String {
+        let what = self.panel.as_deref().unwrap_or("Blood test");
+        match &self.lab_name {
+            Some(lab) => format!("{what} – {lab} ({}) via assistant", self.test_date),
+            None => format!("{what} ({}) via assistant", self.test_date),
+        }
+    }
+
+    /// Source evidence stored with the report: the assistant's verbatim
+    /// transcription when given, otherwise a plain listing of the values.
+    fn raw_text(&self) -> String {
+        if let Some(text) = &self.transcription {
+            return text.clone();
+        }
+        let mut lines = vec![format!("Test date: {}", self.test_date)];
+        lines.extend(self.lab_name.iter().map(|lab| format!("Lab: {lab}")));
+        lines.extend(self.panel.iter().map(|panel| format!("Panel: {panel}")));
+        for r in &self.results {
+            let mut line = format!("{}: {}", r.test_name, r.value_text);
+            if let Some(unit) = &r.unit {
+                line.push_str(&format!(" {unit}"));
+            }
+            if let Some(range) = &r.reference_range {
+                line.push_str(&format!(" (ref {range})"));
+            }
+            if let Some(flag) = &r.flag {
+                line.push_str(&format!(" [{flag}]"));
+            }
+            lines.push(line);
+        }
+        lines.join("\n")
+    }
+
+    /// Dedupes identical re-submissions for the same pet and date.
+    fn content_hash(&self) -> String {
+        let canonical = json!({
+            "source": "assistant",
+            "pet_id": self.pet_id,
+            "test_date": self.test_date,
+            "results": self.results.iter().map(|r| json!([
+                r.test_name.to_lowercase(), r.value_text, r.unit, r.reference_range
+            ])).collect::<Vec<_>>(),
+        });
+        Sha256::digest(canonical.to_string().as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+}
+
+fn bounded_text(value: Option<&Value>, field: &str, max: usize) -> Result<Option<String>, String> {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let text = match value {
+        Value::String(text) => text.trim().to_owned(),
+        Value::Number(number) => number.to_string(),
+        _ => return Err(format!("{field} must be text.")),
+    };
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if text.chars().count() > max {
+        return Err(format!("{field} must be at most {max} characters."));
+    }
+    Ok(Some(text))
+}
+
+/// Numeric value only when the printed value is a plain number
+/// ("1.8", "1,8", "1 234"). Qualified values like "<0.1" stay text-only.
+fn plain_number(value: &str) -> Option<f64> {
+    let cleaned: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+    let cleaned = if cleaned.matches(',').count() == 1 && !cleaned.contains('.') {
+        cleaned.replace(',', ".")
+    } else {
+        cleaned.replace(',', "")
+    };
+    cleaned.parse::<f64>().ok().filter(|n| n.is_finite())
+}
+
+fn parse_blood_test(args: &Value, today: chrono::NaiveDate) -> Result<BloodTestInput, String> {
+    if args.get("confirm").and_then(Value::as_bool) != Some(true) {
+        return Err("Show the owner the extracted values and ask them to confirm first, then call again with confirm:true.".into());
+    }
+    let pet_id = args
+        .get("pet_id")
+        .and_then(Value::as_i64)
+        .ok_or("pet_id is required.")?;
+    let date_text = args
+        .get("test_date")
+        .and_then(Value::as_str)
+        .ok_or("test_date is required (YYYY-MM-DD, as printed on the report).")?;
+    let date = chrono::NaiveDate::parse_from_str(date_text.trim(), "%Y-%m-%d")
+        .map_err(|_| "test_date must be YYYY-MM-DD.".to_owned())?;
+    if date > today {
+        return Err("test_date is in the future. Check the report's date format (day/month vs month/day) with the owner.".into());
+    }
+    if date < chrono::NaiveDate::from_ymd_opt(1980, 1, 1).expect("valid date") {
+        return Err("test_date looks wrong; check it with the owner.".into());
+    }
+    let items = args
+        .get("results")
+        .and_then(Value::as_array)
+        .ok_or("results must be a list of analytes.")?;
+    if items.is_empty() || items.len() > 200 {
+        return Err("results must contain 1 to 200 analytes.".into());
+    }
+    let mut results = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let at = |field: &str| format!("results[{index}].{field}");
+        let test_name = bounded_text(item.get("test_name"), &at("test_name"), 120)?
+            .ok_or_else(|| format!("{} is required.", at("test_name")))?;
+        let value_text = bounded_text(item.get("value"), &at("value"), 60)?
+            .ok_or_else(|| format!("{} is required.", at("value")))?;
+        let flag = bounded_text(item.get("flag"), &at("flag"), 20)?.map(|flag| flag.to_lowercase());
+        if let Some(flag) = &flag
+            && !matches!(flag.as_str(), "high" | "low" | "normal" | "abnormal")
+        {
+            return Err(format!(
+                "{} must be high, low, normal or abnormal.",
+                at("flag")
+            ));
+        }
+        results.push(crate::ocr::ParsedLabResult {
+            value_numeric: plain_number(&value_text),
+            unit: bounded_text(item.get("unit"), &at("unit"), 40)?,
+            reference_range: bounded_text(item.get("reference_range"), &at("reference_range"), 80)?,
+            test_name,
+            value_text,
+            flag,
+        });
+    }
+    Ok(BloodTestInput {
+        pet_id,
+        test_date: date.format("%Y-%m-%d").to_string(),
+        lab_name: bounded_text(args.get("lab_name"), "lab_name", 120)?,
+        panel: bounded_text(args.get("panel"), "panel", 120)?,
+        transcription: bounded_text(args.get("transcription"), "transcription", 20_000)?,
+        results,
+    })
 }
 
 fn integer(args: &Value, key: &str) -> Result<i64, (i32, String)> {
@@ -1477,6 +1694,70 @@ async fn recompute_insights(
 mod tests {
     use super::*;
 
+    fn blood_args() -> Value {
+        json!({
+            "pet_id": 1,
+            "test_date": "2026-11-02",
+            "lab_name": "Vetlab",
+            "results": [
+                {"test_name": "CREA", "value": "1,8", "unit": "mg/dL", "reference_range": "0.8 - 2.4"},
+                {"test_name": "SDMA", "value": "<5", "unit": "ug/dL", "flag": "Low"},
+                {"test_name": "ALT", "value": 92, "flag": "high"}
+            ],
+            "confirm": true
+        })
+    }
+
+    fn day(text: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn blood_test_input_keeps_printed_values_and_parses_plain_numbers() {
+        let input = parse_blood_test(&blood_args(), day("2026-11-15")).unwrap();
+        assert_eq!(input.results.len(), 3);
+        assert_eq!(input.results[0].value_text, "1,8");
+        assert_eq!(input.results[0].value_numeric, Some(1.8));
+        assert_eq!(input.results[1].value_text, "<5");
+        assert_eq!(input.results[1].value_numeric, None);
+        assert_eq!(input.results[1].flag.as_deref(), Some("low"));
+        assert_eq!(input.results[2].value_numeric, Some(92.0));
+        assert!(input.raw_text().contains("CREA: 1,8 mg/dL (ref 0.8 - 2.4)"));
+        assert_eq!(
+            input.content_hash(),
+            parse_blood_test(&blood_args(), day("2026-11-15"))
+                .unwrap()
+                .content_hash()
+        );
+    }
+
+    #[test]
+    fn blood_test_input_rejects_unconfirmed_future_and_bad_flags() {
+        let mut args = blood_args();
+        args["confirm"] = json!(false);
+        assert!(
+            parse_blood_test(&args, day("2026-11-15"))
+                .unwrap_err()
+                .contains("confirm")
+        );
+        let mut args = blood_args();
+        args["test_date"] = json!("2026-12-11");
+        assert!(
+            parse_blood_test(&args, day("2026-11-15"))
+                .unwrap_err()
+                .contains("future")
+        );
+        let mut args = blood_args();
+        args["test_date"] = json!("11/02/2026");
+        assert!(parse_blood_test(&args, day("2026-11-15")).is_err());
+        let mut args = blood_args();
+        args["results"][0]["flag"] = json!("very high");
+        assert!(parse_blood_test(&args, day("2026-11-15")).is_err());
+        let mut args = blood_args();
+        args["results"] = json!([]);
+        assert!(parse_blood_test(&args, day("2026-11-15")).is_err());
+    }
+
     #[test]
     fn structured_content_is_always_an_object() {
         let wrapped = tool_result(json!([{"id":1,"name":"Velcro"}])).unwrap();
@@ -1520,6 +1801,8 @@ mod tests {
             "get_health_insights",
             "record_observation",
             "record_weight",
+            "record_blood_test",
+            "delete_blood_test",
         ] {
             assert!(names.contains(&required), "missing tool: {required}");
         }

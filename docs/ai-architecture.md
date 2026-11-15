@@ -6,7 +6,7 @@ _Status: architectural direction, 2026-11-05. Background monitoring, paid entitl
 
 ChatGPT, Claude, and other MCP clients provide the primary conversational AI: interpreting ordinary language, asking follow-ups, explaining health records and calling tools. Pet Health Journal is the authoritative record layer: ownership and household permissions, original wording, structured data, safe timestamps, timeline, audits and export. Manual web forms remain available.
 
-**Avoid double inference:** `record_weight`, `record_symptom_event`, `record_medication`, `record_prescription` and other structured MCP tools should be used whenever appropriate. `record_observation(pet_id, message)` stores a neutral owner note without the backend LLM. The legacy `record_health_event(message)` may invoke a second server-side model and remains only for compatibility until existing workflows can be migrated safely.
+**Avoid double inference:** `record_weight`, `record_symptom_event`, `record_medication`, `record_prescription` and other structured MCP tools should be used whenever appropriate. `record_observation(pet_id, message)` stores a neutral owner note without the backend LLM. `record_blood_test` stores lab values the MCP client transcribed from a photo or PDF and the owner confirmed (`confirm:true` is enforced server-side); it avoids Mistral OCR entirely. The legacy `record_health_event(message)` may invoke a second server-side model and remains only for compatibility until existing workflows can be migrated safely.
 
 Specialised vision alignment/photo comparison and OCR are optional integrations with separate provider costs and data handling.
 

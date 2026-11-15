@@ -1389,12 +1389,126 @@ pub async fn create_lab_report(
     test_date: Option<&str>,
     results: &[crate::ocr::ParsedLabResult],
 ) -> anyhow::Result<i64> {
+    let parse_status = if results.is_empty() {
+        "needs_review"
+    } else {
+        "parsed"
+    };
+    insert_lab_report(
+        db,
+        household_id,
+        actor,
+        pet_id,
+        source_filename,
+        document_hash,
+        raw_text,
+        test_date,
+        results,
+        parse_status,
+        "lab_report.imported",
+    )
+    .await
+}
+
+/// Save blood-test values that an MCP client (e.g. ChatGPT reading a photo)
+/// transcribed and the owner confirmed. No server-side OCR or model call.
+#[allow(clippy::too_many_arguments)]
+pub async fn record_lab_report(
+    db: &DatabaseConnection,
+    household_id: i64,
+    actor: &str,
+    pet_id: i64,
+    source_label: &str,
+    document_hash: &str,
+    raw_text: &str,
+    test_date: &str,
+    results: &[crate::ocr::ParsedLabResult],
+) -> anyhow::Result<i64> {
+    insert_lab_report(
+        db,
+        household_id,
+        actor,
+        pet_id,
+        source_label,
+        document_hash,
+        raw_text,
+        Some(test_date),
+        results,
+        "assistant_transcribed",
+        "lab_report.recorded",
+    )
+    .await
+}
+
+/// Remove one lab report and its values, household-scoped and audited.
+pub async fn delete_lab_report(
+    db: &DatabaseConnection,
+    household_id: i64,
+    actor: &str,
+    report_id: i64,
+) -> anyhow::Result<bool> {
+    let now = Utc::now().to_rfc3339();
+    let transaction = db.begin().await?;
+    let exists = transaction
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT source_filename FROM lab_reports WHERE household_id=? AND id=?",
+            [household_id.into(), report_id.into()],
+        ))
+        .await?;
+    let Some(row) = exists else {
+        return Ok(false);
+    };
+    let label: String = row.try_get("", "source_filename")?;
+    transaction
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "DELETE FROM lab_results WHERE report_id IN (SELECT id FROM lab_reports WHERE household_id=? AND id=?)",
+            [household_id.into(), report_id.into()],
+        ))
+        .await?;
+    transaction
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "DELETE FROM lab_reports WHERE household_id=? AND id=?",
+            [household_id.into(), report_id.into()],
+        ))
+        .await?;
+    audit(
+        &transaction,
+        household_id,
+        actor,
+        "lab_report.deleted",
+        "lab_report",
+        report_id,
+        &label,
+        &now,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_lab_report(
+    db: &DatabaseConnection,
+    household_id: i64,
+    actor: &str,
+    pet_id: i64,
+    source_filename: &str,
+    document_hash: &str,
+    raw_text: &str,
+    test_date: Option<&str>,
+    results: &[crate::ocr::ParsedLabResult],
+    parse_status: &str,
+    audit_action: &str,
+) -> anyhow::Result<i64> {
     let now = Utc::now().to_rfc3339();
     let transaction = db.begin().await?;
     let row = transaction.query_one(Statement::from_sql_and_values(
         DbBackend::Sqlite,
         "INSERT INTO lab_reports(household_id,pet_id,source_filename,document_hash,raw_text,test_date,imported_at,parse_status) VALUES(?,?,?,?,?,?,?,?) RETURNING id",
-        [household_id.into(), pet_id.into(), source_filename.into(), document_hash.into(), raw_text.into(), test_date.into(), now.clone().into(), (if results.is_empty() { "needs_review" } else { "parsed" }).into()],
+        [household_id.into(), pet_id.into(), source_filename.into(), document_hash.into(), raw_text.into(), test_date.into(), now.clone().into(), parse_status.into()],
     )).await?.ok_or_else(|| anyhow!("lab report insert returned no id"))?;
     let report_id: i64 = row.try_get("", "id")?;
     for result in results {
@@ -1408,7 +1522,7 @@ pub async fn create_lab_report(
         &transaction,
         household_id,
         actor,
-        "lab_report.imported",
+        audit_action,
         "lab_report",
         report_id,
         source_filename,
@@ -3117,6 +3231,53 @@ mod tests {
         let db = connect("sqlite::memory:").await.unwrap();
         migrate(&db).await.unwrap();
         db
+    }
+
+    #[tokio::test]
+    async fn records_and_deletes_assistant_lab_report_within_household() {
+        let db = test_db().await;
+        let pet_id = create_pet(&db, 1, "user:1", "Velcro", "Cat", None, None)
+            .await
+            .unwrap();
+        let results = vec![crate::ocr::ParsedLabResult {
+            test_name: "CREA".into(),
+            value_text: "1.8".into(),
+            value_numeric: Some(1.8),
+            unit: Some("mg/dL".into()),
+            reference_range: Some("0.8 - 2.4".into()),
+            flag: None,
+        }];
+        let report_id = record_lab_report(
+            &db,
+            1,
+            "user:1",
+            pet_id,
+            "Blood test (2026-11-02) via assistant",
+            "hash-1",
+            "CREA: 1.8 mg/dL",
+            "2026-11-02",
+            &results,
+        )
+        .await
+        .unwrap();
+        let reports = list_lab_reports(&db, 1, pet_id).await.unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].parse_status, "assistant_transcribed");
+        assert_eq!(reports[0].test_date.as_deref(), Some("2026-11-02"));
+        assert_eq!(reports[0].results[0].unit.as_deref(), Some("mg/dL"));
+        assert!(report_hash_exists(&db, 1, "hash-1").await.unwrap());
+        assert!(
+            !delete_lab_report(&db, 2, "user:2", report_id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            delete_lab_report(&db, 1, "user:1", report_id)
+                .await
+                .unwrap()
+        );
+        assert!(list_lab_reports(&db, 1, pet_id).await.unwrap().is_empty());
+        assert!(!report_hash_exists(&db, 1, "hash-1").await.unwrap());
     }
 
     #[tokio::test]
