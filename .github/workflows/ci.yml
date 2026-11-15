@@ -71,3 +71,39 @@ jobs:
             ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to Coolify
+    needs: image
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    concurrency:
+      group: coolify-deploy
+      cancel-in-progress: false
+    permissions: {}
+    steps:
+      # The Cloudflare Access service token is dedicated to this repo and is
+      # only admitted on cfy.innermaps.org/api/v1/deploy. Coolify pulls the
+      # freshly published :mvp image and restarts the PetHealth service.
+      - name: Trigger Coolify redeploy
+        shell: bash
+        env:
+          COOLIFY_TOKEN: ${{ secrets.PETHEALTH_COOLIFY_TOKEN }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.PETHEALTH_CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.PETHEALTH_CF_ACCESS_CLIENT_SECRET }}
+          SERVICE_UUID: ${{ vars.PETHEALTH_COOLIFY_SERVICE_UUID }}
+        run: |
+          set -euo pipefail
+          test -n "$COOLIFY_TOKEN"
+          test -n "$CF_ACCESS_CLIENT_ID"
+          test -n "$CF_ACCESS_CLIENT_SECRET"
+          [[ "$SERVICE_UUID" =~ ^[a-z0-9]{20,32}$ ]] || { echo "::error::Invalid PETHEALTH_COOLIFY_SERVICE_UUID"; exit 1; }
+
+          curl --max-redirs 0 --fail-with-body --silent --show-error \
+            --connect-timeout 10 --max-time 60 \
+            --retry 4 --retry-all-errors --retry-delay 5 --retry-max-time 120 \
+            --header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+            --header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+            --header "Authorization: Bearer $COOLIFY_TOKEN" \
+            "https://cfy.innermaps.org/api/v1/deploy?uuid=${SERVICE_UUID}&force=false"
+          echo
