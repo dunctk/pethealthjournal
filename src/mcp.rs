@@ -1353,8 +1353,20 @@ async fn call_tool(
         }
         _ => return Err((-32601, format!("Unknown tool: {name}"))),
     };
+    tool_result(value)
+}
+
+/// MCP requires `structuredContent` to be a JSON object; clients such as
+/// ChatGPT reject arrays or scalars. Non-object tool output is wrapped as
+/// `{"items": ...}` (arrays) or `{"result": ...}` (anything else).
+fn tool_result(value: Value) -> Result<Value, (i32, String)> {
+    let structured = match value {
+        Value::Object(_) => value,
+        Value::Array(_) => json!({ "items": value }),
+        other => json!({ "result": other }),
+    };
     Ok(
-        json!({"content":[{"type":"text","text":serde_json::to_string_pretty(&value).map_err(internal)?}],"structuredContent":value,"isError":false}),
+        json!({"content":[{"type":"text","text":serde_json::to_string_pretty(&structured).map_err(internal)?}],"structuredContent":structured,"isError":false}),
     )
 }
 
@@ -1464,6 +1476,16 @@ async fn recompute_insights(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structured_content_is_always_an_object() {
+        let wrapped = tool_result(json!([{"id":1,"name":"Velcro"}])).unwrap();
+        assert_eq!(wrapped["structuredContent"]["items"][0]["name"], "Velcro");
+        let scalar = tool_result(json!(true)).unwrap();
+        assert_eq!(scalar["structuredContent"], json!({"result": true}));
+        let object = tool_result(json!({"undone": true})).unwrap();
+        assert_eq!(object["structuredContent"], json!({"undone": true}));
+    }
 
     #[test]
     fn consent_csp_allows_registered_redirect_origin() {
