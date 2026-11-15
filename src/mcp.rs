@@ -726,7 +726,7 @@ async fn handle(
                 "protocolVersion": negotiated,
                 "capabilities":{"tools":{"listChanged":false}},
                 "serverInfo":{"name":"pethealth","version":env!("CARGO_PKG_VERSION")},
-                "instructions":"Pet Health Journal is a longitudinal pet health record. You (the assistant) interpret the owner's words and call structured tools; the server timestamps and preserves the original wording. Prefer record_observation or a typed record_* tool over record_health_event to avoid a second model call. Never diagnose, prescribe, or promise emergency monitoring. Findings from get_health_insights describe measured change only."
+                "instructions":"Pet Health Journal is a longitudinal pet health record. You (the assistant) interpret the owner's words and call structured tools; the server timestamps and preserves the original wording. Prefer record_observation or a typed record_* tool over record_health_event to avoid a second model call. Never diagnose, prescribe, or promise emergency monitoring. Findings from get_health_insights describe measured change only. First run: if list_pets returns no pets, the owner is new; ask for their pet's name and species (breed and birth date are optional), then call add_pet before recording anything."
             }))
         }
         "notifications/initialized" => Ok(Value::Null),
@@ -1431,17 +1431,18 @@ async fn call_tool(
                 .ok_or((-32602, "That pet is not in this household.".into()))?;
             // Remove stored files after the records are gone: photos, and lab
             // source files so the folder importer cannot re-import them.
-            let _ = tokio::fs::remove_dir_all(crate::photos::pet_directory(
-                &state.config,
-                user.household_id,
-                pet.id,
-            ))
-            .await;
+            state
+                .files
+                .delete_pet_photos(user.household_id, pet.id)
+                .await;
             for file in &deleted.lab_source_files {
-                if let Ok(path) = crate::ocr::household_file(&state.config, user.household_id, file)
-                {
-                    let _ = tokio::fs::remove_file(path).await;
-                }
+                state
+                    .files
+                    .delete(&crate::storage::FileKey::Report {
+                        household_id: user.household_id,
+                        relative: file,
+                    })
+                    .await;
             }
             json!({"deleted": true, "pet_id": deleted.pet_id, "name": deleted.name, "removed": deleted.removed})
         }
@@ -1902,7 +1903,7 @@ async fn attach_original(
 ) -> anyhow::Result<()> {
     let (bytes, extension) = crate::ocr::fetch_client_file(download_url).await?;
     let relative =
-        crate::ocr::store_original(&state.config, household_id, report_id, &bytes, extension)
+        crate::ocr::store_original(&state.files, household_id, report_id, &bytes, extension)
             .await?;
     db::set_lab_report_original(&state.db, household_id, report_id, &relative).await
 }

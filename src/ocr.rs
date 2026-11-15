@@ -288,42 +288,26 @@ pub fn sniff_extension(bytes: &[u8]) -> Option<&'static str> {
 /// folder importer never scans, so it is not OCR-imported a second time.
 /// Returns the path relative to the household directory.
 pub async fn store_original(
-    config: &Config,
+    files: &crate::storage::FileStore,
     household_id: i64,
     report_id: i64,
     bytes: &[u8],
     extension: &str,
 ) -> anyhow::Result<String> {
-    let directory = household_directory(config, household_id)?.join("originals");
-    tokio::fs::create_dir_all(&directory).await?;
     let relative = format!(
         "originals/report-{report_id}-{}.{extension}",
         &hex_hash(bytes)[..12]
     );
-    tokio::fs::write(
-        household_directory(config, household_id)?.join(&relative),
-        bytes,
-    )
-    .await?;
+    files
+        .put(
+            &crate::storage::FileKey::Report {
+                household_id,
+                relative: &relative,
+            },
+            bytes.to_vec(),
+        )
+        .await?;
     Ok(relative)
-}
-
-/// Resolve a stored relative path inside the household directory, refusing
-/// anything that could escape it.
-pub fn household_file(
-    config: &Config,
-    household_id: i64,
-    relative: &str,
-) -> anyhow::Result<PathBuf> {
-    let rel = Path::new(relative);
-    if rel.is_absolute()
-        || rel
-            .components()
-            .any(|c| !matches!(c, std::path::Component::Normal(_)))
-    {
-        return Err(anyhow!("invalid stored path"));
-    }
-    Ok(household_directory(config, household_id)?.join(rel))
 }
 
 pub fn mime_for_extension(path: &Path) -> Option<&'static str> {
@@ -557,6 +541,8 @@ pub(crate) mod tests {
             app_base_url: None,
             google_client_id: None,
             google_client_secret: None,
+            smtp: None,
+            object_store: None,
         }
     }
     #[test]

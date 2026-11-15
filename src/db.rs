@@ -433,6 +433,20 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
             created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_time ON mcp_tool_calls(created_at DESC);
+        CREATE TABLE IF NOT EXISTS login_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL COLLATE NOCASE,
+            challenge_hash TEXT NOT NULL UNIQUE,
+            code_hash TEXT NOT NULL,
+            next TEXT,
+            client_ip TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            consumed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_login_codes_email ON login_codes(email, created_at);
+        CREATE INDEX IF NOT EXISTS idx_login_codes_ip ON login_codes(client_ip, created_at);
         "#,
     ))
     .await?;
@@ -912,6 +926,207 @@ pub async fn consume_oauth_state(
         None => Ok(None),
         Some(row) => Ok(row.try_get("", "next")?),
     }
+}
+
+/// Wrong guesses allowed per emailed code before it stops working.
+pub const LOGIN_CODE_MAX_ATTEMPTS: i64 = 5;
+
+/// How many codes were issued recently: for this email, for this client IP,
+/// and in total, plus when the newest code for this email was created.
+pub struct LoginCodeVolume {
+    pub for_email: i64,
+    pub for_ip: i64,
+    pub total: i64,
+    pub latest_for_email: Option<DateTime<Utc>>,
+}
+
+pub async fn login_code_volume(
+    db: &DatabaseConnection,
+    email: &str,
+    client_ip: Option<&str>,
+    since: DateTime<Utc>,
+) -> anyhow::Result<LoginCodeVolume> {
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            r#"SELECT
+                 COALESCE(SUM(CASE WHEN email=? COLLATE NOCASE THEN 1 ELSE 0 END),0) AS for_email,
+                 COALESCE(SUM(CASE WHEN client_ip IS NOT NULL AND client_ip=? THEN 1 ELSE 0 END),0) AS for_ip,
+                 COUNT(*) AS total,
+                 MAX(CASE WHEN email=? COLLATE NOCASE THEN created_at END) AS latest_for_email
+               FROM login_codes WHERE created_at>?"#,
+            [
+                email.into(),
+                client_ip.unwrap_or("").into(),
+                email.into(),
+                since.to_rfc3339().into(),
+            ],
+        ))
+        .await?
+        .ok_or_else(|| anyhow!("login code volume query returned no row"))?;
+    let latest: Option<String> = row.try_get("", "latest_for_email")?;
+    Ok(LoginCodeVolume {
+        for_email: row.try_get("", "for_email")?,
+        for_ip: row.try_get("", "for_ip")?,
+        total: row.try_get("", "total")?,
+        latest_for_email: latest
+            .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
+            .map(|value| value.with_timezone(&Utc)),
+    })
+}
+
+fn login_code_hash(challenge: &str, code: &str) -> String {
+    auth::token_hash(&format!("{challenge}:{code}"))
+}
+
+/// Store a new emailed code. Earlier unused codes for the same email stop
+/// working, so only the most recent email is valid. Rows older than a day
+/// are purged here, which keeps the table small without a background job.
+pub async fn create_login_code(
+    db: &DatabaseConnection,
+    email: &str,
+    challenge: &str,
+    code: &str,
+    next: Option<&str>,
+    client_ip: Option<&str>,
+    ttl_minutes: i64,
+) -> anyhow::Result<()> {
+    let now = Utc::now();
+    let transaction = db.begin().await?;
+    transaction
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "DELETE FROM login_codes WHERE created_at<?",
+            [(now - Duration::days(1)).to_rfc3339().into()],
+        ))
+        .await?;
+    transaction
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "UPDATE login_codes SET consumed_at=? WHERE email=? COLLATE NOCASE AND consumed_at IS NULL",
+            [now.to_rfc3339().into(), email.into()],
+        ))
+        .await?;
+    transaction
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            r#"INSERT INTO login_codes(email,challenge_hash,code_hash,next,client_ip,created_at,expires_at)
+               VALUES(?,?,?,?,?,?,?)"#,
+            [
+                email.into(),
+                auth::token_hash(challenge).into(),
+                login_code_hash(challenge, code).into(),
+                next.into(),
+                client_ip.into(),
+                now.to_rfc3339().into(),
+                (now + Duration::minutes(ttl_minutes)).to_rfc3339().into(),
+            ],
+        ))
+        .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum LoginCodeCheck {
+    Valid {
+        email: String,
+        next: Option<String>,
+    },
+    Wrong {
+        attempts_left: i64,
+    },
+    /// Expired, already used, replaced by a newer code, out of attempts,
+    /// or an unknown challenge.
+    Unusable,
+}
+
+/// Check a code against its challenge. A correct code is consumed so it
+/// works exactly once; a wrong one uses up an attempt.
+pub async fn check_login_code(
+    db: &DatabaseConnection,
+    challenge: &str,
+    code: &str,
+) -> anyhow::Result<LoginCodeCheck> {
+    use subtle::ConstantTimeEq;
+    let now = Utc::now().to_rfc3339();
+    let transaction = db.begin().await?;
+    let Some(row) = transaction
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            r#"SELECT id,email,code_hash,next,attempts FROM login_codes
+               WHERE challenge_hash=? AND consumed_at IS NULL AND expires_at>?"#,
+            [auth::token_hash(challenge).into(), now.clone().into()],
+        ))
+        .await?
+    else {
+        return Ok(LoginCodeCheck::Unusable);
+    };
+    let id: i64 = row.try_get("", "id")?;
+    let attempts: i64 = row.try_get("", "attempts")?;
+    if attempts >= LOGIN_CODE_MAX_ATTEMPTS {
+        return Ok(LoginCodeCheck::Unusable);
+    }
+    let stored: String = row.try_get("", "code_hash")?;
+    let offered = login_code_hash(challenge, code);
+    if bool::from(stored.as_bytes().ct_eq(offered.as_bytes())) {
+        transaction
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "UPDATE login_codes SET consumed_at=? WHERE id=?",
+                [now.into(), id.into()],
+            ))
+            .await?;
+        transaction.commit().await?;
+        return Ok(LoginCodeCheck::Valid {
+            email: row.try_get("", "email")?,
+            next: row.try_get("", "next")?,
+        });
+    }
+    transaction
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "UPDATE login_codes SET attempts=attempts+1 WHERE id=?",
+            [id.into()],
+        ))
+        .await?;
+    transaction.commit().await?;
+    let attempts_left = LOGIN_CODE_MAX_ATTEMPTS - attempts - 1;
+    if attempts_left <= 0 {
+        Ok(LoginCodeCheck::Unusable)
+    } else {
+        Ok(LoginCodeCheck::Wrong { attempts_left })
+    }
+}
+
+/// Sign-in by a verified email: the existing account with that email, or a
+/// new household. New accounts get an unusable random password; they sign
+/// in with emailed codes (or Google) instead.
+pub async fn find_or_create_email_user(
+    db: &DatabaseConnection,
+    email: &str,
+) -> anyhow::Result<(UserAccount, bool)> {
+    if let Some(row) = db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT id,household_id,username,email,display_name FROM users WHERE email=? COLLATE NOCASE OR username=? COLLATE NOCASE LIMIT 1",
+            [email.into(), email.into()],
+        ))
+        .await?
+    {
+        return Ok((user_from_row(row)?, false));
+    }
+    let random_password: String = rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+    let password_hash = auth::hash_password(random_password).await?;
+    let display_name = email.split('@').next().unwrap_or("Pet owner");
+    Ok((
+        create_account(db, email, display_name, &password_hash).await?,
+        true,
+    ))
 }
 
 /// Link-or-create for Google OAuth: existing `google_sub` wins; else a

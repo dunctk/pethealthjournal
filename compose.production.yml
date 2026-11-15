@@ -23,6 +23,23 @@ services:
       MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
       BLOOD_TESTS_DIR: ${BLOOD_TESTS_DIR:-/persistent/blood_tests}
       PET_PHOTOS_DIR: ${PET_PHOTOS_DIR:-/persistent/pet_photos}
+      # Optional SMTP for emailed sign-in codes; set all four or none.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+      # Optional S3-compatible storage (Cloudflare R2 when hosted) for photos
+      # and original reports; set the four S3_* values together or none.
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+      S3_REGION: ${S3_REGION:-auto}
+      # Continuous SQLite backup to the same bucket under db/ (needs S3_*).
+      LITESTREAM_ENABLED: ${LITESTREAM_ENABLED:-false}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       RUST_LOG: pethealth=info,tower_http=info
     expose:
       - "3000"

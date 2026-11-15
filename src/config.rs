@@ -32,6 +32,53 @@ impl fmt::Debug for StripeConfig {
     }
 }
 
+/// Outbound SMTP for sign-in codes. Optional: without it the app keeps
+/// password sign-in and sends no email.
+#[derive(Clone)]
+pub struct SmtpConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub from: String,
+}
+
+impl fmt::Debug for SmtpConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SmtpConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("from", &self.from)
+            .field("credentials", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Optional S3-compatible object storage (Cloudflare R2 for the hosted
+/// service) for pet photos and original lab reports.
+#[derive(Clone)]
+pub struct ObjectStoreConfig {
+    pub endpoint: String,
+    pub bucket: String,
+    pub region: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    /// Key prefix inside the bucket, e.g. `files/`; empty or ending in `/`.
+    pub prefix: String,
+}
+
+impl fmt::Debug for ObjectStoreConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ObjectStoreConfig")
+            .field("endpoint", &self.endpoint)
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("prefix", &self.prefix)
+            .field("credentials", &"[REDACTED]")
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub host: String,
@@ -67,6 +114,8 @@ pub struct Config {
     /// request origin and must be allow-listed in Google Cloud Console.
     pub google_client_id: Option<String>,
     pub google_client_secret: Option<String>,
+    pub smtp: Option<SmtpConfig>,
+    pub object_store: Option<ObjectStoreConfig>,
 }
 
 impl Config {
@@ -139,6 +188,8 @@ impl Config {
             app_base_url: nonempty_env("APP_BASE_URL"),
             google_client_id: nonempty_env("GOOGLE_CLIENT_ID"),
             google_client_secret: nonempty_env("GOOGLE_CLIENT_SECRET"),
+            smtp: smtp_config()?,
+            object_store: object_store_config()?,
         })
     }
 
@@ -196,6 +247,67 @@ fn validate_proactive_ai_settings(
     }
 }
 
+/// SMTP is all-or-nothing: a half-configured mailer would show the code
+/// sign-in page and then fail to deliver, so refuse to start instead.
+fn smtp_config() -> anyhow::Result<Option<SmtpConfig>> {
+    let host = nonempty_env("SMTP_HOST");
+    let username = nonempty_env("SMTP_USERNAME");
+    let password = nonempty_env("SMTP_PASSWORD");
+    let from = nonempty_env("EMAIL_FROM");
+    match (host, username, password, from) {
+        (None, None, None, None) => Ok(None),
+        (Some(host), Some(username), Some(password), Some(from)) => {
+            let port = match nonempty_env("SMTP_PORT") {
+                Some(value) => value
+                    .trim()
+                    .parse()
+                    .context("SMTP_PORT must be a valid port")?,
+                None => 587,
+            };
+            Ok(Some(SmtpConfig {
+                host,
+                port,
+                username,
+                password,
+                from,
+            }))
+        }
+        _ => bail!(
+            "email needs SMTP_HOST, SMTP_USERNAME, SMTP_PASSWORD and EMAIL_FROM together, or none of them"
+        ),
+    }
+}
+
+/// All-or-nothing like SMTP: a partial setup would silently keep files on
+/// a disk the operator thinks is no longer used.
+fn object_store_config() -> anyhow::Result<Option<ObjectStoreConfig>> {
+    let endpoint = nonempty_env("S3_ENDPOINT");
+    let bucket = nonempty_env("S3_BUCKET");
+    let access_key_id = nonempty_env("S3_ACCESS_KEY_ID");
+    let secret_access_key = nonempty_env("S3_SECRET_ACCESS_KEY");
+    match (endpoint, bucket, access_key_id, secret_access_key) {
+        (None, None, None, None) => Ok(None),
+        (Some(endpoint), Some(bucket), Some(access_key_id), Some(secret_access_key)) => {
+            let mut prefix = nonempty_env("S3_PREFIX").unwrap_or_else(|| "files/".to_owned());
+            prefix = prefix.trim_matches('/').to_owned();
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            Ok(Some(ObjectStoreConfig {
+                endpoint,
+                bucket,
+                region: nonempty_env("S3_REGION").unwrap_or_else(|| "auto".to_owned()),
+                access_key_id,
+                secret_access_key,
+                prefix,
+            }))
+        }
+        _ => bail!(
+            "object storage needs S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY together, or none of them"
+        ),
+    }
+}
+
 fn env_bool(key: &str) -> bool {
     matches!(
         env::var(key).as_deref(),
@@ -240,6 +352,8 @@ mod tests {
             app_base_url: None,
             google_client_id: None,
             google_client_secret: None,
+            smtp: None,
+            object_store: None,
         };
         assert!(config.database_url.contains("/persistent/pethealth.sqlite"));
         assert!(!config.stripe_configured());

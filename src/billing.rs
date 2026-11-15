@@ -328,6 +328,8 @@ mod tests {
             app_base_url: None,
             google_client_id: None,
             google_client_secret: None,
+            smtp: None,
+            object_store: None,
         }
     }
 

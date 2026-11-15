@@ -79,6 +79,9 @@ pub fn router(state: AppState) -> Router {
         .route("/static/brand.css", get(brand_css))
         .route("/static/logo.svg", get(logo))
         .route("/login", get(login_page).post(login))
+        .route("/login/password", get(password_login_page))
+        .route("/login/code", post(send_login_code))
+        .route("/login/code/verify", post(verify_login_code))
         .route("/register", get(register_page).post(register))
         .route("/oauth/google/start", get(google_start))
         .route("/oauth/google/callback", get(google_callback))
@@ -169,20 +172,293 @@ struct LoginPageQuery {
     next: Option<String>,
 }
 
+/// With email configured, sign-in starts with an emailed code; otherwise
+/// (typical self-hosted setup) it is the password form.
 async fn login_page(
     State(state): State<AppState>,
     Query(query): Query<LoginPageQuery>,
 ) -> Result<Html<String>, AppError> {
-    render(&LoginTemplate {
-        identifier: String::new(),
-        error: None,
-        notice: query
-            .changed
-            .unwrap_or(false)
-            .then(|| "Password updated. Sign in again on this device.".into()),
-        next: query.next,
-        google_enabled: google_enabled(&state),
-    })
+    let notice = query
+        .changed
+        .unwrap_or(false)
+        .then(|| "Password updated. Sign in again on this device.".into());
+    let next = safe_next_owned(query.next.as_deref());
+    if state.mailer.enabled() {
+        return render(&code_email_step(&state, String::new(), next, None, notice));
+    }
+    render(&password_login_template(
+        &state,
+        String::new(),
+        next,
+        None,
+        notice,
+    ))
+}
+
+async fn password_login_page(
+    State(state): State<AppState>,
+    Query(query): Query<LoginPageQuery>,
+) -> Result<Html<String>, AppError> {
+    render(&password_login_template(
+        &state,
+        String::new(),
+        safe_next_owned(query.next.as_deref()),
+        None,
+        None,
+    ))
+}
+
+fn password_login_template(
+    state: &AppState,
+    identifier: String,
+    next: Option<String>,
+    error: Option<String>,
+    notice: Option<String>,
+) -> LoginTemplate {
+    LoginTemplate {
+        identifier,
+        error,
+        notice,
+        next_query: next_query(next.as_deref()),
+        next,
+        google_enabled: google_enabled(state),
+        email_login: state.mailer.enabled(),
+    }
+}
+
+fn code_email_step(
+    state: &AppState,
+    email: String,
+    next: Option<String>,
+    error: Option<String>,
+    notice: Option<String>,
+) -> LoginCodeTemplate {
+    LoginCodeTemplate {
+        email,
+        challenge: None,
+        error,
+        notice,
+        next_query: next_query(next.as_deref()),
+        next,
+        google_enabled: google_enabled(state),
+    }
+}
+
+fn code_entry_step(
+    state: &AppState,
+    email: String,
+    challenge: String,
+    next: Option<String>,
+    error: Option<String>,
+    notice: Option<String>,
+) -> LoginCodeTemplate {
+    LoginCodeTemplate {
+        email,
+        challenge: Some(challenge),
+        error,
+        notice,
+        next_query: next_query(next.as_deref()),
+        next,
+        google_enabled: google_enabled(state),
+    }
+}
+
+const LOGIN_CODE_TTL_MINUTES: i64 = 10;
+const LOGIN_CODES_PER_EMAIL_PER_HOUR: i64 = 5;
+const LOGIN_CODES_PER_IP_PER_HOUR: i64 = 20;
+const LOGIN_CODES_TOTAL_PER_HOUR: i64 = 300;
+const LOGIN_CODE_RESEND_SECONDS: i64 = 30;
+
+#[derive(Deserialize)]
+struct SendCodeForm {
+    email: String,
+    next: Option<String>,
+    /// Set when resending from the code page, so a refusal can keep the
+    /// person on that page with their current code still usable.
+    challenge: Option<String>,
+}
+
+async fn send_login_code(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<SendCodeForm>,
+) -> Result<Response, AppError> {
+    require_form_origin(&state, &headers)?;
+    let next = safe_next_owned(form.next.as_deref());
+    if !state.mailer.enabled() {
+        return Ok(
+            Redirect::to(&format!("/login/password{}", next_query(next.as_deref())))
+                .into_response(),
+        );
+    }
+    let Ok(email) = normalize_email(&form.email) else {
+        return render_status(
+            &code_email_step(
+                &state,
+                form.email.trim().chars().take(254).collect(),
+                next,
+                Some("Enter a valid email address.".into()),
+                None,
+            ),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
+    };
+    let client_ip = client_ip(&headers);
+    let now = Utc::now();
+    let volume = db::login_code_volume(
+        &state.db,
+        &email,
+        client_ip.as_deref(),
+        now - chrono::Duration::hours(1),
+    )
+    .await?;
+    let refusal = if volume
+        .latest_for_email
+        .is_some_and(|at| now - at < chrono::Duration::seconds(LOGIN_CODE_RESEND_SECONDS))
+    {
+        Some("We just sent a code. Give it a moment to arrive before asking for another.")
+    } else if volume.for_email >= LOGIN_CODES_PER_EMAIL_PER_HOUR
+        || volume.for_ip >= LOGIN_CODES_PER_IP_PER_HOUR
+        || volume.total >= LOGIN_CODES_TOTAL_PER_HOUR
+    {
+        Some("Too many codes requested. Please wait a few minutes and try again.")
+    } else {
+        None
+    };
+    let current_challenge = form
+        .challenge
+        .filter(|value| !value.is_empty() && value.len() <= 128);
+    if let Some(message) = refusal {
+        let page = match current_challenge {
+            Some(challenge) => {
+                code_entry_step(&state, email, challenge, next, Some(message.into()), None)
+            }
+            None => code_email_step(&state, email, next, Some(message.into()), None),
+        };
+        return render_status(&page, StatusCode::TOO_MANY_REQUESTS);
+    }
+    let challenge = auth::new_action_token();
+    let code = format!(
+        "{:06}",
+        rand::Rng::random_range(&mut rand::rng(), 0..1_000_000)
+    );
+    db::create_login_code(
+        &state.db,
+        &email,
+        &challenge,
+        &code,
+        next.as_deref(),
+        client_ip.as_deref(),
+        LOGIN_CODE_TTL_MINUTES,
+    )
+    .await?;
+    if let Err(error) = state
+        .mailer
+        .send(crate::email::login_code_email(&email, &code))
+        .await
+    {
+        tracing::error!(%error, "sign-in code email failed");
+        return render_status(
+            &code_email_step(
+                &state,
+                email,
+                next,
+                Some("We couldn't send the email just now. Please try again in a minute.".into()),
+                None,
+            ),
+            StatusCode::BAD_GATEWAY,
+        );
+    }
+    let notice =
+        current_challenge.map(|_| "New code sent. Earlier codes no longer work.".to_owned());
+    Ok(render(&code_entry_step(
+        &state, email, challenge, next, None, notice,
+    ))?
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct VerifyCodeForm {
+    challenge: String,
+    email: String,
+    code: String,
+}
+
+async fn verify_login_code(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<VerifyCodeForm>,
+) -> Result<Response, AppError> {
+    require_form_origin(&state, &headers)?;
+    // People paste "123 456" or "123-456"; only the digits matter.
+    let code: String = form.code.chars().filter(char::is_ascii_digit).collect();
+    let email = normalize_email(&form.email).unwrap_or_default();
+    let check = if code.len() == 6 && form.challenge.len() <= 128 {
+        db::check_login_code(&state.db, &form.challenge, &code).await?
+    } else {
+        db::LoginCodeCheck::Wrong {
+            attempts_left: db::LOGIN_CODE_MAX_ATTEMPTS,
+        }
+    };
+    match check {
+        db::LoginCodeCheck::Valid { email, next } => {
+            let (user, created) = db::find_or_create_email_user(&state.db, &email).await?;
+            if created {
+                tracing::info!(user_id = user.id, "account created by emailed code");
+            }
+            let token = db::create_session(&state.db, user.id).await?;
+            let destination = safe_login_next(next.as_deref()).unwrap_or("/app");
+            Ok(session_redirect(
+                destination,
+                session_cookie(&state, &token, false),
+            ))
+        }
+        db::LoginCodeCheck::Wrong { attempts_left } => render_status(
+            &code_entry_step(
+                &state,
+                email,
+                form.challenge,
+                None,
+                Some(format!(
+                    "That code didn't match. Check the latest email and try again ({attempts_left} {} left).",
+                    if attempts_left == 1 { "try" } else { "tries" }
+                )),
+                None,
+            ),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        db::LoginCodeCheck::Unusable => render_status(
+            &code_email_step(
+                &state,
+                email,
+                None,
+                Some(
+                    "That code has expired or was replaced by a newer one. Request a new code."
+                        .into(),
+                ),
+                None,
+            ),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    }
+}
+
+/// Best-effort client address for rate limiting only (never for auth).
+/// Behind Cloudflare and the Coolify proxy the socket address is the proxy.
+fn client_ip(headers: &HeaderMap) -> Option<String> {
+    let header_value = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    header_value("cf-connecting-ip")
+        .or_else(|| {
+            header_value("x-forwarded-for")
+                .and_then(|value| value.split(',').next().map(|ip| ip.trim().to_owned()))
+        })
+        .or_else(|| header_value("x-real-ip"))
+        .filter(|ip| !ip.is_empty() && ip.len() <= 64)
 }
 
 async fn home_page(
@@ -197,23 +473,40 @@ async fn home_page(
     {
         return Ok(Redirect::to("/app").into_response());
     }
-    Ok(render(&LoginTemplate {
-        identifier: String::new(),
-        error: None,
-        notice: None,
-        next: None,
-        google_enabled: google_enabled(&state),
-    })?
+    if state.mailer.enabled() {
+        return Ok(
+            render(&code_email_step(&state, String::new(), None, None, None))?.into_response(),
+        );
+    }
+    Ok(render(&password_login_template(
+        &state,
+        String::new(),
+        None,
+        None,
+        None,
+    ))?
     .into_response())
 }
 
-async fn register_page(State(state): State<AppState>) -> Result<Html<String>, AppError> {
-    render(&RegisterTemplate {
+/// Password sign-up only exists when email is not configured; with email,
+/// the code sign-in page creates accounts too.
+async fn register_page(
+    State(state): State<AppState>,
+    Query(query): Query<LoginPageQuery>,
+) -> Result<Response, AppError> {
+    let next = safe_next_owned(query.next.as_deref());
+    if state.mailer.enabled() {
+        return Ok(Redirect::to(&format!("/login{}", next_query(next.as_deref()))).into_response());
+    }
+    Ok(render(&RegisterTemplate {
         display_name: String::new(),
         email: String::new(),
         error: None,
+        next_query: next_query(next.as_deref()),
+        next,
         google_enabled: google_enabled(&state),
-    })
+    })?
+    .into_response())
 }
 
 #[derive(Deserialize)]
@@ -239,13 +532,13 @@ async fn login(
     };
     let Some(user) = valid else {
         return render_status(
-            &LoginTemplate {
+            &password_login_template(
+                &state,
                 identifier,
-                error: Some("Email/username or password is incorrect.".into()),
-                notice: None,
-                next: form.next,
-                google_enabled: google_enabled(&state),
-            },
+                safe_next_owned(form.next.as_deref()),
+                Some("Email/username or password is incorrect.".into()),
+                None,
+            ),
             StatusCode::UNPROCESSABLE_ENTITY,
         );
     };
@@ -262,6 +555,7 @@ struct RegisterForm {
     display_name: String,
     email: String,
     password: String,
+    next: Option<String>,
 }
 
 async fn register(
@@ -270,6 +564,10 @@ async fn register(
     Form(form): Form<RegisterForm>,
 ) -> Result<Response, AppError> {
     require_form_origin(&state, &headers)?;
+    let next = safe_next_owned(form.next.as_deref());
+    if state.mailer.enabled() {
+        return Ok(Redirect::to(&format!("/login{}", next_query(next.as_deref()))).into_response());
+    }
     let display_name = clean_required(&form.display_name, 80, "Name")?.to_owned();
     let email = normalize_email(&form.email)?;
     if form.password.chars().count() < 12 || form.password.chars().count() > 128 {
@@ -278,6 +576,8 @@ async fn register(
                 display_name,
                 email,
                 error: Some("Use a password between 12 and 128 characters.".into()),
+                next_query: next_query(next.as_deref()),
+                next,
                 google_enabled: google_enabled(&state),
             },
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -289,6 +589,8 @@ async fn register(
                 display_name,
                 email,
                 error: Some("An account with that email already exists.".into()),
+                next_query: next_query(next.as_deref()),
+                next,
                 google_enabled: google_enabled(&state),
             },
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -298,7 +600,7 @@ async fn register(
     let user = db::create_account(&state.db, &email, &display_name, &password_hash).await?;
     let token = db::create_session(&state.db, user.id).await?;
     Ok(session_redirect(
-        "/app",
+        safe_login_next(next.as_deref()).unwrap_or("/app"),
         session_cookie(&state, &token, false),
     ))
 }
@@ -349,12 +651,16 @@ fn google_redirect_uri(state: &AppState, headers: &HeaderMap) -> String {
 async fn google_start(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<LoginPageQuery>,
 ) -> Result<Response, AppError> {
     let Some(client_id) = state.config.google_client_id.clone() else {
         return Ok(Redirect::to("/login").into_response());
     };
     let login_state = auth::new_action_token();
-    db::create_oauth_state(&state.db, &login_state, Some("/app"), 10).await?;
+    // Keep the ChatGPT/assistant authorization in flight across the Google
+    // round trip; the callback re-validates it before redirecting.
+    let next = safe_login_next(query.next.as_deref()).unwrap_or("/app");
+    db::create_oauth_state(&state.db, &login_state, Some(next), 10).await?;
     let url = format!(
         "https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}",
         urlencoding::encode(&client_id),
@@ -1372,7 +1678,7 @@ async fn upload_photo(
     let (filename, mime_type, bytes) =
         uploaded_file.ok_or_else(|| AppError::validation("Take or choose a photo."))?;
     let storage_name =
-        photos::store_upload(&state.config, user.household_id, pet.id, &mime_type, &bytes)
+        photos::store_upload(&state.files, user.household_id, pet.id, &mime_type, &bytes)
             .await
             .map_err(|error| AppError::validation(error.to_string()))?;
     let captured_at = Utc::now().to_rfc3339();
@@ -1391,7 +1697,7 @@ async fn upload_photo(
     {
         Ok(id) => id,
         Err(error) => {
-            photos::remove_upload(&state.config, user.household_id, pet.id, &storage_name).await;
+            photos::remove_upload(&state.files, user.household_id, pet.id, &storage_name).await;
             return Err(error.into());
         }
     };
@@ -1471,7 +1777,9 @@ async fn photo_image(
     let photo = db::get_pet_photo(&state.db, user.household_id, id)
         .await?
         .ok_or_else(AppError::not_found)?;
-    let bytes = photos::load_photo(&state.config, &photo).await?;
+    let bytes = photos::load_photo(&state.files, &photo)
+        .await
+        .map_err(|_| AppError::not_found())?;
     let mut response = bytes.into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -1493,11 +1801,17 @@ async fn blood_test_original(
     let relative = db::lab_report_original(&state.db, user.household_id, id)
         .await?
         .ok_or_else(AppError::not_found)?;
-    let path = crate::ocr::household_file(&state.config, user.household_id, &relative)?;
-    let bytes = tokio::fs::read(&path)
+    let bytes = state
+        .files
+        .get(&crate::storage::FileKey::Report {
+            household_id: user.household_id,
+            relative: &relative,
+        })
         .await
-        .map_err(|_| AppError::not_found())?;
-    let mime = crate::ocr::mime_for_extension(&path).unwrap_or("application/octet-stream");
+        .map_err(|_| AppError::not_found())?
+        .ok_or_else(AppError::not_found)?;
+    let mime = crate::ocr::mime_for_extension(std::path::Path::new(&relative))
+        .unwrap_or("application/octet-stream");
     let mut response = bytes.into_response();
     response
         .headers_mut()
@@ -1536,8 +1850,8 @@ async fn compare_photos(
     if from_photo.pet_id != pet.id || to_photo.pet_id != pet.id {
         return Err(AppError::not_found());
     }
-    let from_bytes = photos::load_photo(&state.config, &from_photo).await?;
-    let to_bytes = photos::load_photo(&state.config, &to_photo).await?;
+    let from_bytes = photos::load_photo(&state.files, &from_photo).await?;
+    let to_bytes = photos::load_photo(&state.files, &to_photo).await?;
     let analysis = match photos::compare_photos(
         &state.config,
         &pet.name,
@@ -3160,6 +3474,17 @@ fn session_redirect(location: &str, cookie: HeaderValue) -> Response {
     response
 }
 
+fn safe_next_owned(next: Option<&str>) -> Option<String> {
+    safe_login_next(next).map(str::to_owned)
+}
+
+/// `?next=...` for links that must carry an in-flight authorization along.
+fn next_query(next: Option<&str>) -> String {
+    safe_login_next(next)
+        .map(|value| format!("?next={}", urlencoding::encode(value)))
+        .unwrap_or_default()
+}
+
 fn safe_login_next(next: Option<&str>) -> Option<&str> {
     next.filter(|value| {
         (value.starts_with("/oauth/authorize?") || value.starts_with("/oauth/device?"))
@@ -3451,6 +3776,21 @@ struct LoginTemplate {
     error: Option<String>,
     notice: Option<String>,
     next: Option<String>,
+    next_query: String,
+    google_enabled: bool,
+    email_login: bool,
+}
+
+#[derive(Template)]
+#[template(path = "login_code.html")]
+struct LoginCodeTemplate {
+    email: String,
+    /// Present once a code was sent: the page then asks for the code.
+    challenge: Option<String>,
+    error: Option<String>,
+    notice: Option<String>,
+    next: Option<String>,
+    next_query: String,
     google_enabled: bool,
 }
 
@@ -3460,6 +3800,8 @@ struct RegisterTemplate {
     display_name: String,
     email: String,
     error: Option<String>,
+    next: Option<String>,
+    next_query: String,
     google_enabled: bool,
 }
 

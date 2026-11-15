@@ -38,6 +38,8 @@ impl Harness {
             db: database,
             agent: Arc::new(agent::CaptureAgent::new(&config)),
             chat: Arc::new(agent::ChatAgent::new(&config)),
+            mailer: Arc::new(crate::email::Mailer::Disabled),
+            files: Arc::new(crate::storage::FileStore::from_config(&config).unwrap()),
             config: Arc::new(config),
         };
         Self {

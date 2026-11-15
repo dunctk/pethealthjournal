@@ -6,13 +6,17 @@ mod billing;
 mod config;
 mod db;
 mod domain;
+mod email;
 mod entitlements;
 mod insights;
+#[cfg(test)]
+mod login_code_tests;
 mod mcp;
 #[cfg(test)]
 mod mcp_e2e_tests;
 mod ocr;
 mod photos;
+mod storage;
 mod web;
 
 use anyhow::Context;
@@ -27,6 +31,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub agent: Arc<agent::CaptureAgent>,
     pub chat: Arc<agent::ChatAgent>,
+    pub mailer: Arc<email::Mailer>,
+    pub files: Arc<storage::FileStore>,
 }
 
 #[tokio::main]
@@ -44,11 +50,15 @@ async fn main() -> anyhow::Result<()> {
     db::bootstrap_owner(&database, &config.username, &config.password).await?;
     let agent = Arc::new(agent::CaptureAgent::new(&config));
     let chat = Arc::new(agent::ChatAgent::new(&config));
+    let mailer = Arc::new(email::Mailer::from_config(config.smtp.as_ref())?);
+    let files = Arc::new(storage::FileStore::from_config(&config)?);
     let state = AppState {
         db: database,
         config: config.clone(),
         agent,
         chat,
+        mailer,
+        files,
     };
 
     let app = web::router(state)
@@ -65,6 +75,8 @@ async fn main() -> anyhow::Result<()> {
         deployment_mode = ?config.deployment_mode,
         stripe_configured = config.stripe.is_some(),
         proactive_ai_requested = config.proactive_ai_requested,
+        email_configured = config.smtp.is_some(),
+        object_storage = config.object_store.is_some(),
         "pethealth ready"
     );
     axum::serve(listener, app)
