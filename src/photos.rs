@@ -1,11 +1,10 @@
+use crate::storage::{FileKey, FileStore};
 use crate::{config::Config, domain::PetPhoto};
 use anyhow::{Context, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rand::{Rng, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::{Path, PathBuf};
-use tokio::fs;
 
 pub const MAX_PHOTO_BYTES: usize = 15 * 1024 * 1024;
 
@@ -48,7 +47,7 @@ struct ChatMessage {
 }
 
 pub async fn store_upload(
-    config: &Config,
+    files: &FileStore,
     household_id: i64,
     pet_id: i64,
     mime_type: &str,
@@ -63,31 +62,39 @@ pub async fn store_upload(
         .collect::<String>()
         .to_lowercase();
     let storage_name = format!("{storage_name}.{extension}");
-    let directory = pet_directory(config, household_id, pet_id);
-    fs::create_dir_all(&directory)
+    files
+        .put(
+            &FileKey::Photo {
+                household_id,
+                pet_id,
+                storage_name: &storage_name,
+            },
+            bytes.to_vec(),
+        )
         .await
-        .with_context(|| format!("failed to create photo directory {}", directory.display()))?;
-    let path = directory.join(&storage_name);
-    fs::write(&path, bytes)
-        .await
-        .with_context(|| format!("failed to store photo {}", path.display()))?;
+        .context("failed to store photo")?;
     Ok(storage_name)
 }
 
-pub async fn remove_upload(config: &Config, household_id: i64, pet_id: i64, storage_name: &str) {
-    let _ = fs::remove_file(photo_path(config, household_id, pet_id, storage_name)).await;
+pub async fn remove_upload(files: &FileStore, household_id: i64, pet_id: i64, storage_name: &str) {
+    files
+        .delete(&FileKey::Photo {
+            household_id,
+            pet_id,
+            storage_name,
+        })
+        .await;
 }
 
-pub async fn load_photo(config: &Config, photo: &PetPhoto) -> anyhow::Result<Vec<u8>> {
-    let path = photo_path(
-        config,
-        photo.household_id,
-        photo.pet_id,
-        &photo.storage_name,
-    );
-    fs::read(&path)
-        .await
-        .with_context(|| format!("failed to read photo {}", path.display()))
+pub async fn load_photo(files: &FileStore, photo: &PetPhoto) -> anyhow::Result<Vec<u8>> {
+    files
+        .get(&FileKey::Photo {
+            household_id: photo.household_id,
+            pet_id: photo.pet_id,
+            storage_name: &photo.storage_name,
+        })
+        .await?
+        .ok_or_else(|| anyhow!("photo file is missing"))
 }
 
 pub async fn detect_eyes(
@@ -246,16 +253,6 @@ fn extension_for(mime_type: &str) -> anyhow::Result<&'static str> {
         "image/webp" => Ok("webp"),
         _ => bail!("unsupported photo type"),
     }
-}
-
-pub fn pet_directory(config: &Config, household_id: i64, pet_id: i64) -> PathBuf {
-    Path::new(&config.pet_photos_dir)
-        .join(household_id.to_string())
-        .join(pet_id.to_string())
-}
-
-fn photo_path(config: &Config, household_id: i64, pet_id: i64, storage_name: &str) -> PathBuf {
-    pet_directory(config, household_id, pet_id).join(storage_name)
 }
 
 fn data_url(mime_type: &str, bytes: &[u8]) -> String {
