@@ -1407,7 +1407,9 @@ async fn update_pet_microchip(
 ) -> Result<Redirect, AppError> {
     let number = form.microchip_number.trim();
     if !number.is_empty() && !crate::domain::valid_microchip_number(number) {
-        return Err(AppError::validation("Microchip number must contain 9 to 20 digits."));
+        return Err(AppError::validation(
+            "Microchip number must contain 9 to 20 digits.",
+        ));
     }
     let updated = db::update_pet(
         &state.db,
@@ -1423,7 +1425,9 @@ async fn update_pet_microchip(
     .await
     .map_err(|error| {
         if error.to_string().contains("UNIQUE") {
-            AppError::validation("Another pet in your household already uses that microchip number.")
+            AppError::validation(
+                "Another pet in your household already uses that microchip number.",
+            )
         } else {
             AppError::from(error)
         }

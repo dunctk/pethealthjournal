@@ -187,15 +187,48 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
     assert_eq!(updated["pet"]["microchip_number"], "009123456789012");
     let pets = h.ok(&owner, "list_pets", json!({})).await;
     assert_eq!(pets["items"][0]["microchip_number"], "009123456789012");
-    let invalid = h.err(&owner, "update_pet", json!({"pet_id":pet_id,"microchip_number":123456789012345_i64})).await;
+    let invalid = h
+        .err(
+            &owner,
+            "update_pet",
+            json!({"pet_id":pet_id,"microchip_number":123456789012345_i64}),
+        )
+        .await;
     assert!(invalid.contains("must be a string"));
-    let invalid = h.err(&owner, "update_pet", json!({"pet_id":pet_id,"microchip_number":"123XYZ"})).await;
+    let invalid = h
+        .err(
+            &owner,
+            "update_pet",
+            json!({"pet_id":pet_id,"microchip_number":"123XYZ"}),
+        )
+        .await;
     assert!(invalid.contains("9 to 20 digits"));
-    let second_id = h.ok(&owner, "add_pet", json!({"name":"Other","species":"Cat"})).await["pet_id"].as_i64().unwrap();
-    let duplicate = h.err(&owner, "update_pet", json!({"pet_id":second_id,"microchip_number":"009123456789012"})).await;
+    let second_id = h
+        .ok(&owner, "add_pet", json!({"name":"Other","species":"Cat"}))
+        .await["pet_id"]
+        .as_i64()
+        .unwrap();
+    let duplicate = h
+        .err(
+            &owner,
+            "update_pet",
+            json!({"pet_id":second_id,"microchip_number":"009123456789012"}),
+        )
+        .await;
     assert!(duplicate.contains("microchip number"));
-    h.ok(&owner, "update_pet", json!({"pet_id":pet_id,"microchip_number":""})).await;
-    let updated = h.ok(&owner, "update_pet", json!({"pet_id":pet_id,"microchip_number":"009123456789012"})).await;
+    h.ok(
+        &owner,
+        "update_pet",
+        json!({"pet_id":pet_id,"microchip_number":""}),
+    )
+    .await;
+    let updated = h
+        .ok(
+            &owner,
+            "update_pet",
+            json!({"pet_id":pet_id,"microchip_number":"009123456789012"}),
+        )
+        .await;
     assert_eq!(updated["pet"]["microchip_number"], "009123456789012");
     h.err(&owner, "update_pet", json!({"pet_id":pet_id})).await;
 
@@ -390,7 +423,12 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
         )
         .await;
     assert!(deleted["removed"]["lab_reports"].as_u64().unwrap() >= 2);
-    h.ok(&owner, "delete_pet", json!({"pet_id":second_id,"confirm_name":"Other","confirm":true})).await;
+    h.ok(
+        &owner,
+        "delete_pet",
+        json!({"pet_id":second_id,"confirm_name":"Other","confirm":true}),
+    )
+    .await;
     let pets = h.ok(&owner, "list_pets", json!({})).await;
     assert_eq!(pets["items"].as_array().unwrap().len(), 0);
 

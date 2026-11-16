@@ -1387,7 +1387,12 @@ async fn call_tool(
                 Some(_) => return Err((-32602, "microchip_number must be a string.".into())),
                 None => None,
             };
-            if name.is_none() && species.is_none() && breed.is_none() && date_of_birth.is_none() && microchip_number.is_none() {
+            if name.is_none()
+                && species.is_none()
+                && breed.is_none()
+                && date_of_birth.is_none()
+                && microchip_number.is_none()
+            {
                 return Err((-32602, "Give at least one field to change.".into()));
             }
             let updated = db::update_pet(
@@ -1403,8 +1408,15 @@ async fn call_tool(
             )
             .await
             .map_err(|error| {
-                if error.to_string().contains("pets.household_id, pets.microchip_number") {
-                    (-32602, "Another pet in this household already uses that microchip number.".to_owned())
+                if error
+                    .to_string()
+                    .contains("pets.household_id, pets.microchip_number")
+                {
+                    (
+                        -32602,
+                        "Another pet in this household already uses that microchip number."
+                            .to_owned(),
+                    )
                 } else if error.to_string().contains("UNIQUE") {
                     (
                         -32602,
