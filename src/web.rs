@@ -60,6 +60,10 @@ pub fn router(state: AppState) -> Router {
         .route("/shares", post(create_share))
         .route("/shares/{id}/revoke", post(revoke_share))
         .route("/account", get(account_page))
+        .route("/account/household", get(crate::invitations::household_page))
+        .route("/account/household/invite", post(crate::invitations::send_invite))
+        .route("/account/household/invites/{id}/revoke", post(crate::invitations::cancel_invite))
+        .route("/account/household/members/{id}/remove", post(crate::invitations::remove_household_member))
         .route("/account/password", post(change_password))
         .route("/account/api-tokens", post(create_api_token_route))
         .route(
@@ -83,6 +87,8 @@ pub fn router(state: AppState) -> Router {
         .route("/login/code", post(send_login_code))
         .route("/login/code/verify", post(verify_login_code))
         .route("/register", get(register_page).post(register))
+        .route("/invite/{token}", get(crate::invitations::invitation_page))
+        .route("/invite/{token}/accept", post(crate::invitations::accept_invitation))
         .route("/oauth/google/start", get(google_start))
         .route("/oauth/google/callback", get(google_callback))
         .route("/share/{token}", get(shared_pet))
@@ -3468,6 +3474,10 @@ fn session_cookie(state: &AppState, token: &str, clear: bool) -> HeaderValue {
     .expect("session cookie contains only safe characters")
 }
 
+pub(crate) fn invite_session_redirect(state: &AppState, session: &str) -> Response {
+    session_redirect("/app", session_cookie(state, session, false))
+}
+
 fn session_redirect(location: &str, cookie: HeaderValue) -> Response {
     let mut response = Redirect::to(location).into_response();
     response.headers_mut().insert(header::SET_COOKIE, cookie);
@@ -3517,6 +3527,10 @@ fn same_origin(method: &Method, headers: &HeaderMap) -> bool {
         .and_then(|uri| uri.authority().map(|value| value.as_str().to_owned()));
     host.zip(origin_authority.as_deref())
         .is_some_and(|(host, origin)| host == origin)
+}
+
+pub(crate) fn invite_form_same_origin(state: &AppState, headers: &HeaderMap) -> bool {
+    !state.config.production || same_origin(&Method::POST, headers)
 }
 
 fn require_form_origin(state: &AppState, headers: &HeaderMap) -> Result<(), AppError> {
