@@ -52,12 +52,13 @@ fn sql(query: &str, values: Vec<sea_orm::Value>) -> Statement {
 }
 
 pub async fn is_owner(db: &DatabaseConnection, user: &UserAccount) -> anyhow::Result<bool> {
-    Ok(db.query_one(sql(
-        "SELECT 1 FROM users WHERE id=? AND household_id=? AND role='owner'",
-        vec![user.id.into(), user.household_id.into()],
-    ))
-    .await?
-    .is_some())
+    Ok(db
+        .query_one(sql(
+            "SELECT 1 FROM users WHERE id=? AND household_id=? AND role='owner'",
+            vec![user.id.into(), user.household_id.into()],
+        ))
+        .await?
+        .is_some())
 }
 
 pub async fn members(
@@ -171,10 +172,7 @@ pub async fn lookup_invite(
     .transpose()
 }
 
-pub async fn accept_invite(
-    db: &DatabaseConnection,
-    token: &str,
-) -> anyhow::Result<AcceptResult> {
+pub async fn accept_invite(db: &DatabaseConnection, token: &str) -> anyhow::Result<AcceptResult> {
     // The temporary password cannot be inferred from the invitation URL.
     // Email-code login or Google OAuth can be used on later visits.
     let password_hash = auth::hash_password(auth::new_session_token()).await?;
@@ -272,19 +270,24 @@ pub async fn remove_member(
     member_id: i64,
 ) -> anyhow::Result<bool> {
     let tx = db.begin().await?;
-    let allowed = tx.query_one(sql(
-        "SELECT 1 FROM users WHERE id=? AND household_id=? AND role='owner'",
-        vec![owner.id.into(), owner.household_id.into()],
-    )).await?.is_some();
+    let allowed = tx
+        .query_one(sql(
+            "SELECT 1 FROM users WHERE id=? AND household_id=? AND role='owner'",
+            vec![owner.id.into(), owner.household_id.into()],
+        ))
+        .await?
+        .is_some();
     if !allowed {
         return Ok(false);
     }
     // Deleting a member revokes their sessions, API tokens, OAuth tokens,
     // codes and device grants via foreign keys, never the shared pet data.
-    let res = tx.execute(sql(
-        "DELETE FROM users WHERE id=? AND household_id=? AND role='member'",
-        vec![member_id.into(), owner.household_id.into()],
-    )).await?;
+    let res = tx
+        .execute(sql(
+            "DELETE FROM users WHERE id=? AND household_id=? AND role='member'",
+            vec![member_id.into(), owner.household_id.into()],
+        ))
+        .await?;
     if res.rows_affected() > 0 {
         tx.execute(sql(
             "INSERT INTO audit_events(household_id,actor,action,record_type,record_id,detail,created_at) VALUES(?,?,'household.member_removed','user',?,'Member access revoked',?)",
@@ -341,10 +344,15 @@ async fn household_response(
             error,
             email_enabled: state.mailer.enabled(),
         })
-    }.await;
+    }
+    .await;
     match page {
         Ok(page) => render_page(&page),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Could not load household").into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not load household",
+        )
+            .into_response(),
     }
 }
 
@@ -363,7 +371,8 @@ pub async fn household_page(
         &user,
         query.sent.map(|_| "Invitation emailed.".to_owned()),
         None,
-    ).await
+    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -394,15 +403,33 @@ pub async fn send_invite(
         return (StatusCode::FORBIDDEN, "Only owners can invite members").into_response();
     }
     let Some(email) = valid_email(&form.email) else {
-        return household_response(&state, &user, None, Some("Enter a valid email address.".into())).await;
+        return household_response(
+            &state,
+            &user,
+            None,
+            Some("Enter a valid email address.".into()),
+        )
+        .await;
     };
     if !state.mailer.enabled() {
-        return household_response(&state, &user, None, Some("Configure SMTP to email invitations.".into())).await;
+        return household_response(
+            &state,
+            &user,
+            None,
+            Some("Configure SMTP to email invitations.".into()),
+        )
+        .await;
     }
     // A fixed configured origin prevents Host-header poisoning of emailed
     // authentication links. Production invitations require HTTPS.
     let Some(base) = state.config.app_base_url.as_deref() else {
-        return household_response(&state, &user, None, Some("Set APP_BASE_URL to send invitations.".into())).await;
+        return household_response(
+            &state,
+            &user,
+            None,
+            Some("Set APP_BASE_URL to send invitations.".into()),
+        )
+        .await;
     };
     let base = base.trim_end_matches('/');
     if reqwest::Url::parse(base).ok().is_none_or(|url| {
@@ -413,17 +440,33 @@ pub async fn send_invite(
             || url.query().is_some()
             || url.fragment().is_some()
     }) {
-        return household_response(&state, &user, None, Some("APP_BASE_URL must be the site's origin (HTTPS in production).".into())).await;
+        return household_response(
+            &state,
+            &user,
+            None,
+            Some("APP_BASE_URL must be the site's origin (HTTPS in production).".into()),
+        )
+        .await;
     }
     let token = auth::new_action_token();
     if let Err(error) = create_invite(&state.db, &user, &email, &token).await {
         return household_response(&state, &user, None, Some(error.to_string())).await;
     }
     let link = format!("{base}/invite/{token}");
-    if let Err(error) = state.mailer.send(email::household_invite_email(&email, &link)).await {
+    if let Err(error) = state
+        .mailer
+        .send(email::household_invite_email(&email, &link))
+        .await
+    {
         tracing::warn!(%error, "household invitation email delivery failed");
         let _ = revoke_invite_token(&state.db, &user, &token).await;
-        return household_response(&state, &user, None, Some("The invitation could not be emailed. Please retry.".into())).await;
+        return household_response(
+            &state,
+            &user,
+            None,
+            Some("The invitation could not be emailed. Please retry.".into()),
+        )
+        .await;
     }
     Redirect::to("/account/household?sent=1").into_response()
 }
@@ -436,7 +479,11 @@ pub async fn cancel_invite(
     match revoke_invite(&state.db, &user, id).await {
         Ok(true) => Redirect::to("/account/household").into_response(),
         Ok(false) => (StatusCode::FORBIDDEN, "Invite not found or not permitted").into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Unable to revoke invitation").into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to revoke invitation",
+        )
+            .into_response(),
     }
 }
 
@@ -452,16 +499,17 @@ pub async fn remove_household_member(
     }
 }
 
-pub async fn invitation_page(
-    State(state): State<AppState>,
-    Path(token): Path<String>,
-) -> Response {
+pub async fn invitation_page(State(state): State<AppState>, Path(token): Path<String>) -> Response {
     let invite = if token.len() == 48 && token.bytes().all(|value| value.is_ascii_alphanumeric()) {
         lookup_invite(&state.db, &token).await.ok().flatten()
     } else {
         None
     };
-    render_page(&InviteTemplate { token, invite, error: None })
+    render_page(&InviteTemplate {
+        token,
+        invite,
+        error: None,
+    })
 }
 
 pub async fn accept_invitation(
@@ -470,10 +518,18 @@ pub async fn accept_invitation(
     Path(token): Path<String>,
 ) -> Response {
     if !web::invite_form_same_origin(&state, &headers) {
-        return (StatusCode::FORBIDDEN, "Cross-origin invitation acceptance rejected").into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            "Cross-origin invitation acceptance rejected",
+        )
+            .into_response();
     }
     if token.len() != 48 || !token.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
-        return render_page(&InviteTemplate { token, invite: None, error: None });
+        return render_page(&InviteTemplate {
+            token,
+            invite: None,
+            error: None,
+        });
     }
     match accept_invite(&state.db, &token).await {
         Ok(AcceptResult::Accepted(user_id)) => match db::create_session(&state.db, user_id).await {
