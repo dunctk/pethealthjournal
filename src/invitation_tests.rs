@@ -65,9 +65,21 @@ impl Site {
             .await
             .unwrap();
         let status = response.status();
-        let location = response.headers().get(header::LOCATION).map(|v| v.to_str().unwrap().to_owned());
-        let cookie = response.headers().get(header::SET_COOKIE).map(|v| v.to_str().unwrap().to_owned());
-        let body = String::from_utf8(to_bytes(response.into_body(), 1_000_000).await.unwrap().to_vec()).unwrap();
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .map(|v| v.to_str().unwrap().to_owned());
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .map(|v| v.to_str().unwrap().to_owned());
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
         (status, location, cookie, body)
     }
 
@@ -84,14 +96,18 @@ impl Site {
         let mail = sent.last().unwrap();
         let prefix = "https://pets.example/invite/";
         let start = mail.text.find(prefix).unwrap() + prefix.len();
-        mail.text[start..].split_whitespace().next().unwrap().to_owned()
+        mail.text[start..]
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_owned()
     }
 
     async fn invite(&self, cookie: &str, email: &str) -> String {
         let body = format!("email={}", urlencoding::encode(email));
-        let (status, location, _, page) = self.request(
-            "POST", "/account/household/invite", Some(cookie), &body,
-        ).await;
+        let (status, location, _, page) = self
+            .request("POST", "/account/household/invite", Some(cookie), &body)
+            .await;
         assert_eq!(status, StatusCode::SEE_OTHER, "{page}");
         assert_eq!(location.as_deref(), Some("/account/household?sent=1"));
         self.invite_token()
@@ -103,14 +119,21 @@ async fn invitation_preview_is_inert_and_acceptance_creates_shared_member_sessio
     let site = Site::new(true).await;
     let (owner, owner_cookie) = site.owner().await;
     let token = site.invite(&owner_cookie, "MEMBER@EXAMPLE.COM").await;
-    let (_, _, _, html) = site.request("GET", &format!("/invite/{token}"), None, "").await;
+    let (_, _, _, html) = site
+        .request("GET", &format!("/invite/{token}"), None, "")
+        .await;
     assert!(html.contains("Accept invitation and sign in"));
-    let (_, _, _, html) = site.request("GET", &format!("/invite/{token}"), None, "").await;
-    assert!(html.contains("Accept invitation and sign in"), "scanners must not consume GET");
+    let (_, _, _, html) = site
+        .request("GET", &format!("/invite/{token}"), None, "")
+        .await;
+    assert!(
+        html.contains("Accept invitation and sign in"),
+        "scanners must not consume GET"
+    );
 
-    let (status, location, cookie, _) = site.request(
-        "POST", &format!("/invite/{token}/accept"), None, "",
-    ).await;
+    let (status, location, cookie, _) = site
+        .request("POST", &format!("/invite/{token}/accept"), None, "")
+        .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
     assert_eq!(location.as_deref(), Some("/app"));
     let session_cookie = cookie.expect("automatic login sets a session");
@@ -120,16 +143,35 @@ async fn invitation_preview_is_inert_and_acceptance_creates_shared_member_sessio
     let (status, _, _, _) = site.request("GET", "/app", Some(member_cookie), "").await;
     assert_eq!(status, StatusCode::OK);
     let (member, _) = db::user_for_login(&site.state.db, "member@example.com")
-        .await.unwrap().expect("member exists");
+        .await
+        .unwrap()
+        .expect("member exists");
     assert_eq!(member.household_id, owner.household_id);
-    assert!(!invitations::is_owner(&site.state.db, &member).await.unwrap());
-    assert_eq!(invitations::members(&site.state.db, owner.household_id).await.unwrap().len(), 2);
+    assert!(
+        !invitations::is_owner(&site.state.db, &member)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        invitations::members(&site.state.db, owner.household_id)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
 
-    let (_, _, _, html) = site.request("GET", &format!("/invite/{token}"), None, "").await;
+    let (_, _, _, html) = site
+        .request("GET", &format!("/invite/{token}"), None, "")
+        .await;
     assert!(html.contains("Invitation unavailable"));
-    let (status, _, cookie, _) = site.request("POST", &format!("/invite/{token}/accept"), None, "").await;
+    let (status, _, cookie, _) = site
+        .request("POST", &format!("/invite/{token}/accept"), None, "")
+        .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(cookie.is_none(), "single-use invitation never creates another session");
+    assert!(
+        cookie.is_none(),
+        "single-use invitation never creates another session"
+    );
 }
 
 #[tokio::test]
@@ -137,54 +179,104 @@ async fn owner_can_revoke_pending_invite_and_remove_member_without_deleting_hous
     let site = Site::new(true).await;
     let (owner, owner_cookie) = site.owner().await;
     let token = site.invite(&owner_cookie, "member@example.com").await;
-    let invitations = invitations::pending(&site.state.db, owner.household_id).await.unwrap();
+    let invitations = invitations::pending(&site.state.db, owner.household_id)
+        .await
+        .unwrap();
     assert_eq!(invitations.len(), 1);
     let invite_id = invitations[0].id;
-    let (status, _, _, _) = site.request(
-        "POST", &format!("/account/household/invites/{invite_id}/revoke"),
-        Some(&owner_cookie), "",
-    ).await;
+    let (status, _, _, _) = site
+        .request(
+            "POST",
+            &format!("/account/household/invites/{invite_id}/revoke"),
+            Some(&owner_cookie),
+            "",
+        )
+        .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
-    let (_, _, _, html) = site.request("GET", &format!("/invite/{token}"), None, "").await;
+    let (_, _, _, html) = site
+        .request("GET", &format!("/invite/{token}"), None, "")
+        .await;
     assert!(html.contains("Invitation unavailable"));
 
     let token = site.invite(&owner_cookie, "member@example.com").await;
-    let (_, _, cookie, _) = site.request("POST", &format!("/invite/{token}/accept"), None, "").await;
+    let (_, _, cookie, _) = site
+        .request("POST", &format!("/invite/{token}/accept"), None, "")
+        .await;
     let cookie = cookie.unwrap();
     let member_cookie = cookie.split(';').next().unwrap().to_owned();
     let (member, _) = db::user_for_login(&site.state.db, "member@example.com")
-        .await.unwrap().unwrap();
-    let (status, _, _, _) = site.request(
-        "POST", &format!("/account/household/members/{member_id}/remove", member_id=owner.id),
-        Some(&member_cookie), "",
-    ).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "a member may not remove owners");
-    let (status, _, _, _) = site.request(
-        "POST", &format!("/account/household/members/{member_id}/remove", member_id=member.id),
-        Some(&owner_cookie), "",
-    ).await;
+        .await
+        .unwrap()
+        .unwrap();
+    let (status, _, _, _) = site
+        .request(
+            "POST",
+            &format!(
+                "/account/household/members/{member_id}/remove",
+                member_id = owner.id
+            ),
+            Some(&member_cookie),
+            "",
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a member may not remove owners"
+    );
+    let (status, _, _, _) = site
+        .request(
+            "POST",
+            &format!(
+                "/account/household/members/{member_id}/remove",
+                member_id = member.id
+            ),
+            Some(&owner_cookie),
+            "",
+        )
+        .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
     let (status, _, _, _) = site.request("GET", "/app", Some(&member_cookie), "").await;
-    assert_eq!(status, StatusCode::SEE_OTHER, "removed member session revoked");
-    assert_eq!(invitations::members(&site.state.db, owner.household_id).await.unwrap().len(), 1);
+    assert_eq!(
+        status,
+        StatusCode::SEE_OTHER,
+        "removed member session revoked"
+    );
+    assert_eq!(
+        invitations::members(&site.state.db, owner.household_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
 async fn owner_cannot_invite_existing_account_or_send_without_smtp() {
     let site = Site::new(true).await;
     let (_, cookie) = site.owner().await;
-    let (status, _, _, page) = site.request(
-        "POST", "/account/household/invite", Some(&cookie), "email=owner%40example.com",
-    ).await;
+    let (status, _, _, page) = site
+        .request(
+            "POST",
+            "/account/household/invite",
+            Some(&cookie),
+            "email=owner%40example.com",
+        )
+        .await;
     assert_eq!(status, StatusCode::OK);
     assert!(page.contains("already has an account"));
     assert_eq!(site.outbox.lock().unwrap().len(), 0);
 
     let site = Site::new(false).await;
     let (_, cookie) = site.owner().await;
-    let (status, _, _, page) = site.request(
-        "POST", "/account/household/invite", Some(&cookie), "email=member%40example.com",
-    ).await;
+    let (status, _, _, page) = site
+        .request(
+            "POST",
+            "/account/household/invite",
+            Some(&cookie),
+            "email=member%40example.com",
+        )
+        .await;
     assert_eq!(status, StatusCode::OK);
     assert!(page.contains("Configure SMTP"));
 }
@@ -195,14 +287,25 @@ async fn invite_acceptance_does_not_consume_link_when_existing_user_claims_email
     let (_, cookie) = site.owner().await;
     let token = site.invite(&cookie, "member@example.com").await;
     let existing = db::create_account(&site.state.db, "member@example.com", "Other", "hash")
-        .await.unwrap();
-    let (status, _, session, html) = site.request("POST", &format!("/invite/{token}/accept"), None, "").await;
+        .await
+        .unwrap();
+    let (status, _, session, html) = site
+        .request("POST", &format!("/invite/{token}/accept"), None, "")
+        .await;
     assert_eq!(status, StatusCode::OK);
     assert!(session.is_none());
     assert!(html.contains("already has an account"));
-    let (user, _) = db::user_for_login(&site.state.db, "member@example.com").await.unwrap().unwrap();
+    let (user, _) = db::user_for_login(&site.state.db, "member@example.com")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(user.household_id, existing.household_id);
-    assert!(invitations::lookup_invite(&site.state.db, &token).await.unwrap().is_some());
+    assert!(
+        invitations::lookup_invite(&site.state.db, &token)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
