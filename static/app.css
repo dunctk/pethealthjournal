@@ -440,3 +440,22 @@ input::placeholder { color: #586168; }
 .pet-microchip > summary .pet-microchip-action { margin-left: .7rem; color: var(--info); font-weight: 700; }
 .pet-microchip .stack-form { max-width: 27rem; padding: .3rem .9rem .9rem; }
 .pet-microchip .stack-form p { margin: 0; color: var(--muted); font-size: .72rem; }
+
+
+/* Private pet travel documents. */
+.passport-tab { margin-top: 1.3rem; }
+.passport-form { max-width: 32rem; }
+.passport-note { color: var(--muted); font-size: .75rem; line-height: 1.55; }
+.passport-files { display: grid; gap: .65rem; margin-top: 1rem; }
+.passport-file { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: .85rem; border: 1px solid var(--line); border-radius: .55rem; background: var(--raised); }
+.passport-file-info { display: grid; min-width: 0; gap: .25rem; }
+.passport-file-info strong { font-size: .85rem; overflow-wrap: anywhere; }
+.passport-file-info small { color: var(--muted); overflow-wrap: anywhere; }
+.passport-file-actions { display: flex; align-items: center; gap: .45rem; }
+.passport-file-actions a { display: inline-flex; align-items: center; justify-content: center; }
+@media (max-width: 680px) {
+  .passport-file { align-items: stretch; flex-direction: column; }
+  .passport-file-actions { width: 100%; }
+  .passport-file-actions > a, .passport-file-actions > form { flex: 1; }
+  .passport-file-actions form button { width: 100%; }
+}

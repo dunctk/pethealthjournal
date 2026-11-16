@@ -18,6 +18,7 @@ mod mcp;
 #[cfg(test)]
 mod mcp_e2e_tests;
 mod ocr;
+mod passports;
 mod photos;
 mod storage;
 mod web;

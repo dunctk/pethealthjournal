@@ -5,9 +5,9 @@ use crate::{
     domain::{
         ApiTokenInfo, HealthEvent, KnowledgeArticle, LabReport, MedicationAdherence,
         MedicationAdministration, MedicationPlanChange, MedicationPlanStop, MedicationPrescription,
-        Pet, PetPhoto, ShareGrant, TimelineEntry, UserAccount, WeightEntry,
+        Pet, PetPassport, PetPhoto, ShareGrant, TimelineEntry, UserAccount, WeightEntry,
     },
-    ocr, photos,
+    ocr, passports, photos,
 };
 use askama::Template;
 use axum::{
@@ -42,6 +42,9 @@ pub fn router(state: AppState) -> Router {
         .route("/medication-adherence", post(create_adherence))
         .route("/blood-tests/upload", post(upload_blood_test))
         .route("/blood-tests/import", post(import_blood_tests))
+        .route("/passports/upload", post(upload_pet_passport))
+        .route("/passports/{id}/file", get(download_pet_passport))
+        .route("/passports/{id}/delete", post(delete_pet_passport_route))
         .route("/photos/upload", post(upload_photo))
         .route("/photos/{id}/image", get(photo_image))
         .route("/blood-tests/{id}/original", get(blood_test_original))
@@ -913,6 +916,7 @@ enum ConsoleView {
     Plan,
     Labs,
     Photos,
+    Passports,
     Sharing,
 }
 
@@ -923,6 +927,7 @@ impl ConsoleView {
             Some("plan") => Self::Plan,
             Some("labs") => Self::Labs,
             Some("photos") => Self::Photos,
+            Some("passports") => Self::Passports,
             Some("sharing") => Self::Sharing,
             _ => Self::Timeline,
         }
@@ -942,12 +947,16 @@ impl ConsoleView {
     fn is_sharing(self) -> bool {
         self == Self::Sharing
     }
+    fn is_passports(self) -> bool {
+        self == Self::Passports
+    }
     fn label(self) -> &'static str {
         match self {
             Self::Timeline => "Timeline",
             Self::Plan => "Plan",
             Self::Labs => "Labs",
             Self::Photos => "Photos",
+            Self::Passports => "Passport",
             Self::Sharing => "Sharing",
         }
     }
@@ -957,6 +966,7 @@ impl ConsoleView {
             Self::Plan => "plan",
             Self::Labs => "labs",
             Self::Photos => "photos",
+            Self::Passports => "passports",
             Self::Sharing => "sharing",
         }
     }
@@ -1141,6 +1151,14 @@ async fn render_tab_from_data(
             .render()?
         }
         ConsoleView::Photos => render_photos_tab(state, household_id, pet).await?,
+        ConsoleView::Passports => {
+            let passports = db::list_pet_passports(&state.db, household_id, pet.id).await?;
+            TabPassportsTemplate {
+                pet: pet.clone(),
+                passports,
+            }
+            .render()?
+        }
         ConsoleView::Sharing => TabSharingTemplate {
             pet: pet.clone(),
             shares: data.shares,
@@ -1703,6 +1721,141 @@ async fn render_photos_tab(
         default_to_id,
     }
     .render()?)
+}
+
+/// Upload one scan or PDF page of a pet passport. No automatic extraction:
+/// source documents remain authoritative and private.
+async fn upload_pet_passport(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Redirect, AppError> {
+    require_form_origin(&state, &headers)?;
+    let mut pet_id = None;
+    let mut label = None;
+    let mut uploaded = None;
+    while let Some(field) = multipart.next_field().await? {
+        match field.name() {
+            Some("pet_id") => {
+                pet_id = field
+                    .text()
+                    .await
+                    .ok()
+                    .and_then(|text| text.parse::<i64>().ok());
+            }
+            Some("label") => {
+                label = Some(field.text().await?);
+            }
+            Some("file") => {
+                let filename = field.file_name().unwrap_or("pet-passport").to_owned();
+                let bytes = field.bytes().await?.to_vec();
+                uploaded = Some((filename, bytes));
+            }
+            _ => {}
+        }
+    }
+    let pet_id = pet_id.ok_or_else(|| AppError::validation("Select a pet."))?;
+    db::get_pet(&state.db, user.household_id, pet_id)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    let label = label.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    if label.is_some_and(|v| v.chars().count() > 100) {
+        return Err(AppError::validation(
+            "The document label must be under 100 characters.",
+        ));
+    }
+    let (filename, bytes) =
+        uploaded.ok_or_else(|| AppError::validation("Choose a PDF or passport photo."))?;
+    let (path, mime, extension) = passports::store(&state.files, user.household_id, pet_id, &bytes)
+        .await
+        .map_err(|error| AppError::validation(error.to_string()))?;
+    let filename = passports::safe_filename(&filename, extension);
+    if let Err(error) = db::create_pet_passport(
+        &state.db,
+        user.household_id,
+        &user.audit_actor(),
+        pet_id,
+        label,
+        &filename,
+        mime,
+        &path,
+    )
+    .await
+    {
+        passports::remove(&state.files, user.household_id, &path).await;
+        return Err(error.into());
+    }
+    Ok(Redirect::to(&format!("/app?pet={pet_id}&view=passports")))
+}
+
+async fn download_pet_passport(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    Path(passport_id): Path<i64>,
+) -> Result<Response, AppError> {
+    let passport = db::get_pet_passport(&state.db, user.household_id, passport_id)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    let bytes = state
+        .files
+        .get(&crate::storage::FileKey::Report {
+            household_id: user.household_id,
+            relative: &passport.storage_path,
+        })
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    let extension = match passport.mime_type.as_str() {
+        "application/pdf" => "pdf",
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        _ => return Err(AppError::not_found()),
+    };
+    let mut response = bytes.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&passport.mime_type)
+            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!(
+            "attachment; filename=\"pet-passport.{extension}\""
+        ))
+        .unwrap_or(HeaderValue::from_static("attachment")),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    response.headers_mut().insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok(response)
+}
+
+async fn delete_pet_passport_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    headers: HeaderMap,
+    Path(passport_id): Path<i64>,
+) -> Result<Redirect, AppError> {
+    require_form_origin(&state, &headers)?;
+    let removed = db::delete_pet_passport(
+        &state.db,
+        user.household_id,
+        &user.audit_actor(),
+        passport_id,
+    )
+    .await?
+    .ok_or_else(AppError::not_found)?;
+    passports::remove(&state.files, user.household_id, &removed.storage_path).await;
+    Ok(Redirect::to(&format!(
+        "/app?pet={}&view=passports",
+        removed.pet_id
+    )))
 }
 
 async fn upload_photo(
@@ -3787,6 +3940,13 @@ struct PhotoAnalysisTemplate {
     from_photo: PetPhoto,
     to_photo: PetPhoto,
     analysis: String,
+}
+
+#[derive(Template)]
+#[template(path = "_tab_passports.html")]
+struct TabPassportsTemplate {
+    pet: Pet,
+    passports: Vec<PetPassport>,
 }
 
 #[derive(Template)]
