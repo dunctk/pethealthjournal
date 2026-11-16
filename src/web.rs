@@ -60,10 +60,22 @@ pub fn router(state: AppState) -> Router {
         .route("/shares", post(create_share))
         .route("/shares/{id}/revoke", post(revoke_share))
         .route("/account", get(account_page))
-        .route("/account/household", get(crate::invitations::household_page))
-        .route("/account/household/invite", post(crate::invitations::send_invite))
-        .route("/account/household/invites/{id}/revoke", post(crate::invitations::cancel_invite))
-        .route("/account/household/members/{id}/remove", post(crate::invitations::remove_household_member))
+        .route(
+            "/account/household",
+            get(crate::invitations::household_page),
+        )
+        .route(
+            "/account/household/invite",
+            post(crate::invitations::send_invite),
+        )
+        .route(
+            "/account/household/invites/{id}/revoke",
+            post(crate::invitations::cancel_invite),
+        )
+        .route(
+            "/account/household/members/{id}/remove",
+            post(crate::invitations::remove_household_member),
+        )
         .route("/account/password", post(change_password))
         .route("/account/api-tokens", post(create_api_token_route))
         .route(
@@ -88,7 +100,10 @@ pub fn router(state: AppState) -> Router {
         .route("/login/code/verify", post(verify_login_code))
         .route("/register", get(register_page).post(register))
         .route("/invite/{token}", get(crate::invitations::invitation_page))
-        .route("/invite/{token}/accept", post(crate::invitations::accept_invitation))
+        .route(
+            "/invite/{token}/accept",
+            post(crate::invitations::accept_invitation),
+        )
         .route("/oauth/google/start", get(google_start))
         .route("/oauth/google/callback", get(google_callback))
         .route("/share/{token}", get(shared_pet))
