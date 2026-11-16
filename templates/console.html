@@ -69,6 +69,16 @@
           <div id="record-dialog-slot" class="record-dialog-slot"></div>
         </dialog>
       </section>
+      <details class="pet-microchip">
+        <summary>Microchip: {% match pet.microchip_number %}{% when Some with (number) %}<strong>{{ number }}</strong>{% when None %}<span>Not recorded</span>{% endmatch %} <span class="pet-microchip-action">Edit</span></summary>
+        <form method="post" action="/pets/{{ pet.id }}/microchip" class="stack-form">
+          <label>Microchip number
+            <input type="text" name="microchip_number" inputmode="numeric" autocomplete="off" pattern="[0-9]{9,20}" maxlength="20" placeholder="Usually 15 digits" value="{% match pet.microchip_number %}{% when Some with (number) %}{{ number }}{% when None %}{% endmatch %}">
+          </label>
+          <p>Digits only. Leave blank to clear an incorrect number. Visible only to signed-in household members, not on vet-share pages.</p>
+          <button class="button primary" type="submit">Save microchip</button>
+        </form>
+      </details>
       <section class="metrics" aria-label="Health summary">
         {% include "_events_metric.html" %}
         {% include "_latest_weight_metric.html" %}

@@ -36,8 +36,14 @@ pub struct Pet {
     pub species: String,
     pub breed: Option<String>,
     pub date_of_birth: Option<String>,
+    pub microchip_number: Option<String>,
     pub weight_kg: Option<f64>,
     pub initials: String,
+}
+
+/// Microchip identifiers are strings to preserve leading zeros.
+pub fn valid_microchip_number(value: &str) -> bool {
+    (9..=20).contains(&value.len()) && value.bytes().all(|ch| ch.is_ascii_digit())
 }
 
 #[derive(Clone, Debug, Serialize)]
