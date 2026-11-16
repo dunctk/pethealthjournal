@@ -305,6 +305,18 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_weights_tenant_pet_time
             ON weight_entries(household_id, pet_id, measured_at DESC);
+        CREATE TABLE IF NOT EXISTS pet_passports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            household_id INTEGER NOT NULL REFERENCES households(id),
+            pet_id INTEGER NOT NULL REFERENCES pets(id) ON DELETE CASCADE,
+            label TEXT,
+            filename TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            storage_path TEXT NOT NULL UNIQUE,
+            uploaded_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_passports_household_pet
+            ON pet_passports(household_id, pet_id, uploaded_at DESC);
         CREATE TABLE IF NOT EXISTS pet_photos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             household_id INTEGER NOT NULL,
@@ -1701,8 +1713,8 @@ pub async fn delete_pet(
     let lab_source_files = transaction
         .query_all(Statement::from_sql_and_values(
             DbBackend::Sqlite,
-            "SELECT source_filename AS f FROM lab_reports WHERE household_id=? AND pet_id=? UNION ALL SELECT original_file AS f FROM lab_reports WHERE household_id=? AND pet_id=? AND original_file IS NOT NULL",
-            [household_id.into(), pet_id.into(), household_id.into(), pet_id.into()],
+            "SELECT source_filename AS f FROM lab_reports WHERE household_id=? AND pet_id=? UNION ALL SELECT original_file AS f FROM lab_reports WHERE household_id=? AND pet_id=? AND original_file IS NOT NULL UNION ALL SELECT storage_path AS f FROM pet_passports WHERE household_id=? AND pet_id=?",
+            [household_id.into(), pet_id.into(), household_id.into(), pet_id.into(), household_id.into(), pet_id.into()],
         ))
         .await?
         .into_iter()
@@ -1710,7 +1722,11 @@ pub async fn delete_pet(
         .collect::<Result<Vec<_>, _>>()?;
     let mut removed = std::collections::BTreeMap::new();
     // Children before parents so foreign keys hold even with enforcement on.
-    let steps: [(&str, &str); 12] = [
+    let steps: [(&str, &str); 13] = [
+        (
+            "pet_passports",
+            "DELETE FROM pet_passports WHERE household_id=? AND pet_id=?",
+        ),
         (
             "lab_results",
             "DELETE FROM lab_results WHERE report_id IN (SELECT id FROM lab_reports WHERE household_id=? AND pet_id=?)",
@@ -1842,6 +1858,136 @@ pub async fn delete_weight(
     .await?;
     transaction.commit().await?;
     Ok(Some(serde_json::from_str(&snapshot)?))
+}
+
+
+pub async fn create_pet_passport(
+    db: &DatabaseConnection,
+    household_id: i64,
+    actor: &str,
+    pet_id: i64,
+    label: Option<&str>,
+    filename: &str,
+    mime_type: &str,
+    storage_path: &str,
+) -> anyhow::Result<i64> {
+    let now = Utc::now().to_rfc3339();
+    let tx = db.begin().await?;
+    let row = tx
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO pet_passports(household_id,pet_id,label,filename,mime_type,storage_path,uploaded_at) SELECT ?,?,?,?,?,?,? FROM pets WHERE id=? AND household_id=? RETURNING id",
+            [
+                household_id.into(),
+                pet_id.into(),
+                label.into(),
+                filename.into(),
+                mime_type.into(),
+                storage_path.into(),
+                now.clone().into(),
+                pet_id.into(),
+                household_id.into(),
+            ],
+        ))
+        .await?
+        .ok_or_else(|| anyhow!("pet does not belong to household"))?;
+    let id: i64 = row.try_get("", "id")?;
+    audit(
+        &tx,
+        household_id,
+        actor,
+        "passport.created",
+        "pet_passport",
+        id,
+        "Private passport document uploaded",
+        &now,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+fn pet_passport_from_row(row: QueryResult) -> anyhow::Result<crate::domain::PetPassport> {
+    Ok(crate::domain::PetPassport {
+        id: row.try_get("", "id")?,
+        household_id: row.try_get("", "household_id")?,
+        pet_id: row.try_get("", "pet_id")?,
+        label: row.try_get("", "label")?,
+        filename: row.try_get("", "filename")?,
+        mime_type: row.try_get("", "mime_type")?,
+        storage_path: row.try_get("", "storage_path")?,
+        uploaded_at: row.try_get("", "uploaded_at")?,
+    })
+}
+
+pub async fn list_pet_passports(
+    db: &DatabaseConnection,
+    household_id: i64,
+    pet_id: i64,
+) -> anyhow::Result<Vec<crate::domain::PetPassport>> {
+    let rows = db
+        .query_all(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT id,household_id,pet_id,label,filename,mime_type,storage_path,uploaded_at FROM pet_passports WHERE household_id=? AND pet_id=? ORDER BY uploaded_at DESC,id DESC LIMIT 100",
+            [household_id.into(), pet_id.into()],
+        ))
+        .await?;
+    rows.into_iter().map(pet_passport_from_row).collect()
+}
+
+pub async fn get_pet_passport(
+    db: &DatabaseConnection,
+    household_id: i64,
+    passport_id: i64,
+) -> anyhow::Result<Option<crate::domain::PetPassport>> {
+    db.query_one(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "SELECT id,household_id,pet_id,label,filename,mime_type,storage_path,uploaded_at FROM pet_passports WHERE household_id=? AND id=?",
+        [household_id.into(), passport_id.into()],
+    ))
+    .await?
+    .map(pet_passport_from_row)
+    .transpose()
+}
+
+pub async fn delete_pet_passport(
+    db: &DatabaseConnection,
+    household_id: i64,
+    actor: &str,
+    passport_id: i64,
+) -> anyhow::Result<Option<crate::domain::PetPassport>> {
+    let tx = db.begin().await?;
+    let found = tx
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT id,household_id,pet_id,label,filename,mime_type,storage_path,uploaded_at FROM pet_passports WHERE household_id=? AND id=?",
+            [household_id.into(), passport_id.into()],
+        ))
+        .await?
+        .map(pet_passport_from_row)
+        .transpose()?;
+    let Some(passport) = found else {
+        return Ok(None);
+    };
+    tx.execute(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "DELETE FROM pet_passports WHERE household_id=? AND id=?",
+        [household_id.into(), passport_id.into()],
+    ))
+    .await?;
+    audit(
+        &tx,
+        household_id,
+        actor,
+        "passport.deleted",
+        "pet_passport",
+        passport_id,
+        "Private passport document deleted",
+        &Utc::now().to_rfc3339(),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Some(passport))
 }
 
 pub async fn create_pet_photo(

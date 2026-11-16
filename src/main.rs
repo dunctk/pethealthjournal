@@ -19,6 +19,7 @@ mod mcp;
 mod mcp_e2e_tests;
 mod ocr;
 mod photos;
+mod passports;
 mod storage;
 mod web;
 

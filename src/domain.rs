@@ -46,6 +46,19 @@ pub fn valid_microchip_number(value: &str) -> bool {
     (9..=20).contains(&value.len()) && value.bytes().all(|ch| ch.is_ascii_digit())
 }
 
+/// Private identity document associated with one pet. Only available within its household.
+#[derive(Clone, Debug, Serialize)]
+pub struct PetPassport {
+    pub id: i64,
+    pub household_id: i64,
+    pub pet_id: i64,
+    pub label: Option<String>,
+    pub filename: String,
+    pub mime_type: String,
+    pub storage_path: String,
+    pub uploaded_at: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct HealthEvent {
     pub id: i64,
