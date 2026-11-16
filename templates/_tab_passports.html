@@ -1,0 +1,38 @@
+<section id="passports-tab" class="passport-tab" aria-label="Private pet passport documents">
+  <div class="tracker-box passport-box">
+    <div class="side-label">PRIVATE DOCUMENTS / {{ pet.name }}</div>
+    <h2>Pet passport</h2>
+    <p>Save a scan of the full passport as a PDF, or upload individual page photos. Documents are private to your household and are never included in vet share links.</p>
+    <form method="post" action="/passports/upload" enctype="multipart/form-data" class="tracker-form passport-form">
+      <input type="hidden" name="pet_id" value="{{ pet.id }}">
+      <label class="full-width">Passport PDF or photo
+        <input required type="file" name="file" accept=".pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/jpeg,image/png,image/webp">
+      </label>
+      <label class="full-width">Page or section label (optional)
+        <input type="text" name="label" maxlength="100" placeholder="e.g. Identity page or Rabies vaccinations">
+      </label>
+      <button class="button primary full-width" type="submit">Save private passport scan</button>
+    </form>
+    <p class="passport-note">Upload each page separately if you don't have a combined PDF. Each file is limited to 15 MB. Uploading a scan does not verify travel eligibility or replace the physical passport.</p>
+    {% if passports.is_empty() %}
+      <p class="tracker-empty">No passport scans have been uploaded for {{ pet.name }}.</p>
+    {% else %}
+      <div class="passport-files">
+      {% for document in passports %}
+        <article class="passport-file">
+          <div class="passport-file-info">
+            <strong>{% match document.label %}{% when Some with (label) %}{{ label }}{% when None %}Passport scan{% endmatch %}</strong>
+            <small>{{ document.filename }} · Uploaded {{ document.uploaded_at }}</small>
+          </div>
+          <div class="passport-file-actions">
+            <a class="button secondary" href="/passports/{{ document.id }}/file">Download</a>
+            <form method="post" action="/passports/{{ document.id }}/delete" onsubmit="return confirm('Permanently remove this private passport scan?')">
+              <button class="button secondary" type="submit">Remove</button>
+            </form>
+          </div>
+        </article>
+      {% endfor %}
+      </div>
+    {% endif %}
+  </div>
+</section>
