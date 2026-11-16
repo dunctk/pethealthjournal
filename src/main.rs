@@ -10,6 +10,9 @@ mod email;
 mod entitlements;
 mod insights;
 #[cfg(test)]
+mod invitation_tests;
+mod invitations;
+#[cfg(test)]
 mod login_code_tests;
 mod mcp;
 #[cfg(test)]

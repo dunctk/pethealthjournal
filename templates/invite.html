@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Household invitation · Pet Health Journal</title><link rel="stylesheet" href="/static/app.css"></head>
+<body class="auth-page">
+  <header class="auth-topbar"><a class="brand" href="/"><img class="brand-mark" src="/static/logo.svg" alt=""><span>Pet Health Journal</span></a></header>
+  <main class="auth-shell">
+    <section class="auth-panel">
+    <div class="eyebrow">HOUSEHOLD INVITATION</div>
+    {% match invite %}
+      {% when Some with (details) %}
+        <h1>Join {{ details.household_name }}</h1>
+        <p>This invitation lets <strong>{{ details.email }}</strong> access this household's shared pet records. You can connect your own AI assistant after joining.</p>
+        {% match error %}{% when Some with (message) %}<p class="auth-error" role="alert">{{ message }}</p>{% when None %}
+        <form method="post" action="/invite/{{ token }}/accept"><button class="button primary" type="submit">Accept invitation and sign in</button></form>
+        {% endmatch %}
+        <p class="auth-note">Only accept an invitation you expected. This link works once and expires after seven days.</p>
+      {% when None %}
+        <h1>Invitation unavailable</h1><p>This invitation has expired, been revoked or already been used. Ask the household owner for a new link.</p>
+    {% endmatch %}
+    </section>
+  </main>
+</body></html>

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Household members · Pet Health Journal</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="auth-page">
+  <header class="auth-topbar"><a class="brand" href="/"><img class="brand-mark" src="/static/logo.svg" alt=""><span>Pet Health Journal</span></a><a class="back-console" href="/account">← Account settings</a></header>
+  <main class="settings-shell">
+    <header class="settings-head"><div class="eyebrow">YOUR HOUSEHOLD</div><h1>Household members</h1><p>Share pet records with another person using their own account and AI assistants.</p></header>
+    {% match notice %}{% when Some with (message) %}<p class="auth-notice" role="status">{{ message }}</p>{% when None %}{% endmatch %}
+    {% match error %}{% when Some with (message) %}<p class="auth-error" role="alert">{{ message }}</p>{% when None %}{% endmatch %}
+    <section class="settings-grid">
+      <section class="auth-panel settings-panel">
+        <h2>People with access</h2>
+        <ul class="token-list">
+          {% for member in members %}
+          <li><span>{{ member.display_name }} {% match member.email %}{% when Some with (email) %}({{ email }}){% when None %}{% endmatch %}<span class="token-meta"> · {{ member.role }}</span></span>
+          {% if is_owner %}{% if member.role == "member" %}
+          <form method="post" action="/account/household/members/{{ member.id }}/remove"><button class="button secondary" type="submit">Remove access</button></form>
+          {% endif %}{% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </section>
+      {% if is_owner %}
+      <section class="auth-panel settings-panel">
+        <h2>Invite member</h2><p>They will receive a link to join this household without setting a password. Invitations expire after seven days.</p>
+        {% if email_enabled %}
+        <form method="post" action="/account/household/invite" class="auth-form">
+          <label>Email address<input type="email" name="email" required maxlength="254" autocomplete="off" placeholder="member@example.com"></label>
+          <button class="button primary" type="submit">Email invitation</button>
+        </form>
+        {% else %}<p class="auth-note">Configure SMTP to send invitations.</p>{% endif %}
+        <h3>Pending invitations</h3>
+        {% if invites.is_empty() %}<p class="auth-note">No pending invitations.</p>{% else %}
+        <ul class="token-list">
+          {% for invite in invites %}
+          <li><span>{{ invite.email }}<span class="token-meta"> · expires {{ invite.expires_at }}</span></span>
+            <form method="post" action="/account/household/invites/{{ invite.id }}/revoke"><button class="button secondary" type="submit">Revoke</button></form>
+          </li>
+          {% endfor %}
+        </ul>{% endif %}
+      </section>
+      {% endif %}
+    </section>
+    <p class="auth-note">Each member connects ChatGPT, Gemini, Claude or another compatible MCP client separately, through their own OAuth approval.</p>
+  </main>
+</body>
+</html>

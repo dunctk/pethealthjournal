@@ -433,6 +433,19 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
             created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_time ON mcp_tool_calls(created_at DESC);
+        CREATE TABLE IF NOT EXISTS household_invites (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            household_id INTEGER NOT NULL REFERENCES households(id),
+            invited_by INTEGER NOT NULL REFERENCES users(id),
+            email TEXT NOT NULL COLLATE NOCASE,
+            token_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            accepted_at TEXT,
+            revoked_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_household_invites_pending
+            ON household_invites(household_id, email, expires_at);
         CREATE TABLE IF NOT EXISTS login_codes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT NOT NULL COLLATE NOCASE,
