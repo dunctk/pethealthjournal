@@ -13,7 +13,7 @@ use axum::{
 };
 use chrono::{Duration, Utc};
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DbBackend, QueryResult, Statement, TransactionTrait,
+    ConnectionTrait, DatabaseConnection, DbBackend, Statement, TransactionTrait,
 };
 use serde::Deserialize;
 
@@ -537,7 +537,7 @@ pub async fn accept_invitation(
             Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Sign-in failed. Use email login.").into_response(),
         },
         Ok(AcceptResult::AlreadyRegistered) => render_page(&InviteTemplate {
-            token,
+            token: token.clone(),
             invite: lookup_invite(&state.db, &token).await.ok().flatten(),
             error: Some("This address already has an account. Contact the household owner; existing accounts are never moved automatically.".into()),
         }),
