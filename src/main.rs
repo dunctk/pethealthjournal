@@ -11,6 +11,8 @@ mod entitlements;
 mod insights;
 mod invitations;
 #[cfg(test)]
+mod invitation_tests;
+#[cfg(test)]
 mod login_code_tests;
 mod mcp;
 #[cfg(test)]
