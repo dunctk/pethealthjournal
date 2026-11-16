@@ -29,6 +29,8 @@ services:
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       EMAIL_FROM: ${EMAIL_FROM:-}
+      # Canonical public origin for invitation and OAuth links.
+      APP_BASE_URL: ${APP_BASE_URL:-https://app.pethealthjournal.com}
       # Optional S3-compatible storage (Cloudflare R2 when hosted) for photos
       # and original reports; set the four S3_* values together or none.
       S3_ENDPOINT: ${S3_ENDPOINT:-}
