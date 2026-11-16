@@ -232,6 +232,31 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
     assert_eq!(updated["pet"]["microchip_number"], "009123456789012");
     h.err(&owner, "update_pet", json!({"pet_id":pet_id})).await;
 
+    // Private passport scans: storage and tenant isolation.
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.4\n%%EOF");
+    let saved = h
+        .ok(
+            &owner,
+            "add_pet_passport",
+            json!({"pet_id":pet_id,"filename":"Identity.pdf","label":"Identity","content_base64":encoded}),
+        )
+        .await;
+    let passport_id = saved["passport_id"].as_i64().unwrap();
+    let docs = h.ok(&owner, "list_pet_passports", json!({"pet_id":pet_id})).await;
+    assert_eq!(docs["items"][0]["passport_id"], passport_id);
+    assert_eq!(docs["items"][0]["label"], "Identity");
+    assert_eq!(docs["items"][0]["authentication_required"], true);
+    assert!(h.err(&stranger, "list_pet_passports", json!({"pet_id":pet_id})).await.contains("not in this household"));
+    assert!(h.err(&stranger, "add_pet_passport", json!({"pet_id":pet_id,"content_base64":encoded})).await.contains("not in this household"));
+    assert!(h.err(&owner, "add_pet_passport", json!({"pet_id":pet_id,"content_base64":base64::engine::general_purpose::STANDARD.encode(b"bad document")})).await.contains("PDF, JPEG, PNG or WebP"));
+    assert!(h.err(&owner, "delete_pet_passport", json!({"passport_id":passport_id,"confirm":false})).await.contains("confirm"));
+    assert!(h.err(&stranger, "delete_pet_passport", json!({"passport_id":passport_id,"confirm":true})).await.contains("not in this household"));
+    let removed = h.ok(&owner, "delete_pet_passport", json!({"passport_id":passport_id,"confirm":true})).await;
+    assert_eq!(removed["deleted"], true);
+    assert_eq!(h.ok(&owner, "list_pet_passports", json!({"pet_id":pet_id})).await["items"].as_array().unwrap().len(), 0);
+    h.ok(&owner, "add_pet_passport", json!({"pet_id":pet_id,"filename":"Rabies.pdf","content_base64":encoded})).await;
+
     // Isolation: another household sees nothing and cannot act.
     let theirs = h.ok(&stranger, "list_pets", json!({})).await;
     assert_eq!(theirs["items"].as_array().unwrap().len(), 0);
@@ -423,6 +448,7 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
         )
         .await;
     assert!(deleted["removed"]["lab_reports"].as_u64().unwrap() >= 2);
+    assert_eq!(deleted["removed"]["pet_passports"], 1);
     h.ok(
         &owner,
         "delete_pet",

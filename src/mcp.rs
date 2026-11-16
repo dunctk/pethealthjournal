@@ -782,6 +782,9 @@ async fn handle(
 fn tool_list() -> Value {
     json!({"tools":[
         {"name":"list_pets","description":"List the pets in the signed-in household.","inputSchema":{"type":"object","properties":{}},"annotations":{"readOnlyHint":true}},
+        {"name":"list_pet_passports","description":"List saved passport scans for one pet. Download URLs require a signed-in member of the household; no OCR or travel-validity assessment.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
+        {"name":"add_pet_passport","description":"Save one passport PDF or photographed page. Use passport_file for a ChatGPT attachment OR content_base64 for API clients with raw bytes; never both. Confirm the correct pet before saving.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"label":{"type":"string","maxLength":100},"filename":{"type":"string","maxLength":120},"passport_file":{"type":"object","properties":{"download_url":{"type":"string"},"file_id":{"type":"string"}}},"content_base64":{"type":"string","description":"Base64-encoded PDF/JPEG/PNG/WebP bytes (API clients only)."}},"required":["pet_id"]},"_meta":{"openai/fileParams":["passport_file"]}},
+        {"name":"delete_pet_passport","description":"Permanently remove a stored passport scan and its file, only after explicit approval and confirm:true.","inputSchema":{"type":"object","properties":{"passport_id":{"type":"integer"},"confirm":{"type":"boolean"}},"required":["passport_id","confirm"]},"annotations":{"destructiveHint":true}},
         {"name":"get_pet_timeline","description":"Read active health events for one pet, newest first. The owner's original wording is preserved in raw_input. Prefer narrow date ranges and small limits over bulk history.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":25},"offset":{"type":"integer","minimum":0,"default":0},"since":{"type":"string","description":"Earliest date to include, YYYY-MM-DD."},"until":{"type":"string","description":"Latest date to include, YYYY-MM-DD."},"category":{"type":"string","enum":["symptom","observation","medication","measurement","vet_visit"],"description":"Filter by event type."}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
         {"name":"get_clinical_timeline","description":"Read a pet's symptoms, medications, and neutral time links between them. This is context for a vet, not a diagnosis.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
         {"name":"get_medication_plan","description":"Read a pet's current prescriptions and dose-adherence history. This is a record, not a dosing recommendation.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
@@ -799,7 +802,7 @@ fn tool_list() -> Value {
         {"name":"record_medication_adherence","description":"Record whether a scheduled prescription dose was given, partial, missed, or unknown. Use days_ago for a past calendar day; the server chooses the date.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"prescription_id":{"type":"integer"},"days_ago":{"type":"integer","minimum":0,"maximum":36500},"actual_dose_value":{"type":"number"},"actual_dose_unit":{"type":"string"},"status":{"type":"string","enum":["given","partial","missed","unknown"]},"reason":{"type":"string"},"message":{"type":"string"}},"required":["pet_id","prescription_id","status"]}},
         {"name":"record_blood_test","description":"Save blood-test (lab) results for a pet, e.g. from a photo or PDF of a vet lab report the owner shared with you. You read the report yourself; no server-side OCR runs. WORKFLOW: 1) call list_pets to get pet_id; 2) transcribe EVERY analyte exactly as printed (name, value, unit, reference range, H/L flag) plus the report's collection/test date; 3) show the owner the extracted table and ask them to confirm or correct it; 4) only then call this tool with confirm:true. Do not convert units, round, infer missing values or interpret results. If the photo is unreadable or the date is missing, ask the owner instead of guessing.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"test_date":{"type":"string","description":"Date the sample was collected/tested as printed on the report, YYYY-MM-DD. Not today's date unless the report says so."},"lab_name":{"type":"string","maxLength":120,"description":"Clinic or laboratory name, if printed."},"panel":{"type":"string","maxLength":120,"description":"Panel/report title if printed, e.g. 'Biochemistry', 'CBC', 'SDMA'."},"transcription":{"type":"string","maxLength":20000,"description":"Verbatim text of the report as you read it, kept as the source record."},"results":{"type":"array","minItems":1,"maxItems":200,"items":{"type":"object","properties":{"test_name":{"type":"string","maxLength":120,"description":"Analyte exactly as printed, e.g. 'CREA', 'ALT', 'SDMA'."},"value":{"type":"string","maxLength":60,"description":"Value exactly as printed, e.g. '1.8', '<0.1', '>500', 'Positive'."},"unit":{"type":"string","maxLength":40},"reference_range":{"type":"string","maxLength":80,"description":"As printed, e.g. '0.8 - 2.4'."},"flag":{"type":"string","enum":["high","low","normal","abnormal"],"description":"Only if the report marks it (H/L/*). Omit otherwise."}},"required":["test_name","value"]}},"confirm":{"type":"boolean","description":"Must be true, and only after the owner reviewed and approved the extracted values."},"report_file":{"type":"object","description":"The photo or PDF of the report the owner attached, so the original is kept with the record.","properties":{"download_url":{"type":"string"},"file_id":{"type":"string"}}}},"required":["pet_id","test_date","results","confirm"]},"_meta":{"openai/fileParams":["report_file"]}},
         {"name":"update_pet","description":"Edit a pet's profile, including its microchip number. Only specified fields change; use an empty string to clear breed, date_of_birth, or microchip_number. A microchip number is a 9–20 digit string to preserve leading zeros. Confirm changes with the owner first.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"name":{"type":"string","maxLength":80},"species":{"type":"string","maxLength":60},"breed":{"type":"string","maxLength":120},"date_of_birth":{"type":"string","description":"YYYY-MM-DD, or empty to clear."},"microchip_number":{"type":"string","maxLength":20,"description":"9–20 digits. Pass as text to preserve leading zeroes, or an empty string to clear."}},"required":["pet_id"]}},
-        {"name":"delete_pet","description":"PERMANENTLY delete a pet and ALL of its records (timeline, weights, medications, blood tests, photos, vet share links). Cannot be undone. Only when the owner explicitly asks; state what will be lost and get approval. confirm_name must exactly equal the pet's name.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"confirm_name":{"type":"string","description":"The pet's exact name, as typed confirmation."},"confirm":{"type":"boolean"}},"required":["pet_id","confirm_name","confirm"]},"annotations":{"destructiveHint":true}},
+        {"name":"delete_pet","description":"PERMANENTLY delete a pet and ALL of its records (timeline, weights, medications, blood tests, photos, passport scans, vet share links). Cannot be undone. Only when the owner explicitly asks; state what will be lost and get approval. confirm_name must exactly equal the pet's name.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"confirm_name":{"type":"string","description":"The pet's exact name, as typed confirmation."},"confirm":{"type":"boolean"}},"required":["pet_id","confirm_name","confirm"]},"annotations":{"destructiveHint":true}},
         {"name":"delete_weight","description":"Delete one mistaken weight entry. Get weight ids from get_weight_history. Only when the owner asks.","inputSchema":{"type":"object","properties":{"weight_id":{"type":"integer"}},"required":["weight_id"]},"annotations":{"destructiveHint":true}},
         {"name":"create_vet_share","description":"Create a private, read-only link to one pet's health record for a vet or clinic. The link expires (default 14 days, max 90) and can be revoked. Returns the URL once; give it to the owner to send. Confirm the recipient and duration with the owner first.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"label":{"type":"string","maxLength":120,"description":"Who it is for, e.g. 'Dr Smith, Riverside Vets'."},"days":{"type":"integer","minimum":1,"maximum":90,"default":14},"confirm":{"type":"boolean"}},"required":["pet_id","label","confirm"]}},
         {"name":"list_vet_shares","description":"List vet share links for the household with their status (active, expired, revoked). URLs are not shown again after creation.","inputSchema":{"type":"object","properties":{}},"annotations":{"readOnlyHint":true}},
@@ -835,6 +838,119 @@ async fn call_tool(
                 .map_err(internal)?,
         )
         .map_err(internal)?,
+        "list_pet_passports" => {
+            let pet_id = integer(&args, "pet_id")?;
+            db::get_pet(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?
+                .ok_or((-32602, "That pet is not in this household.".into()))?;
+            let documents = db::list_pet_passports(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?;
+            let items: Vec<Value> = documents
+                .iter()
+                .map(|doc| json!({
+                    "passport_id": doc.id,
+                    "pet_id": doc.pet_id,
+                    "label": doc.label,
+                    "filename": doc.filename,
+                    "mime_type": doc.mime_type,
+                    "uploaded_at": doc.uploaded_at,
+                    "download_url": format!("{origin}/passports/{}/file", doc.id),
+                    "authentication_required": true
+                }))
+                .collect();
+            json!({"items": items})
+        }
+        "add_pet_passport" => {
+            let pet_id = integer(&args, "pet_id")?;
+            db::get_pet(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?
+                .ok_or((-32602, "That pet is not in this household.".into()))?;
+            let label = bounded_text(args.get("label"), "label", 100)
+                .map_err(|error| (-32602, error))?;
+            let filename = bounded_text(args.get("filename"), "filename", 120)
+                .map_err(|error| (-32602, error))?;
+            let attached_url = args
+                .get("passport_file")
+                .and_then(|file| file.get("download_url"))
+                .and_then(Value::as_str);
+            let base64_content = args.get("content_base64").and_then(Value::as_str);
+            if attached_url.is_some() == base64_content.is_some() {
+                return Err((-32602, "Supply either an attached passport_file or content_base64, but not both.".into()));
+            }
+            let bytes = if let Some(url) = attached_url {
+                let (bytes, _) = crate::ocr::fetch_client_file(url)
+                    .await
+                    .map_err(|error| (-32602, format!("Could not access attached passport file: {error}")))?;
+                bytes
+            } else {
+                let content = base64_content.ok_or((-32602, "Missing passport file.".to_owned()))?;
+                if content.len() > crate::passports::MAX_PASSPORT_BYTES * 4 / 3 + 16 {
+                    return Err((-32602, "Passport upload is too large (15 MB max).".into()));
+                }
+                base64::engine::general_purpose::STANDARD
+                    .decode(content)
+                    .map_err(|_| (-32602, "content_base64 is invalid.".into()))?
+            };
+            let (storage_path, mime, extension) = crate::passports::store(
+                &state.files,
+                user.household_id,
+                pet_id,
+                &bytes,
+            )
+            .await
+            .map_err(|error| (-32602, error.to_string()))?;
+            let filename = crate::passports::safe_filename(
+                filename.as_deref().unwrap_or(""),
+                extension,
+            );
+            let saved = db::create_pet_passport(
+                &state.db,
+                user.household_id,
+                &user.audit_actor(),
+                pet_id,
+                label.as_deref(),
+                &filename,
+                mime,
+                &storage_path,
+            )
+            .await;
+            let passport_id = match saved {
+                Ok(id) => id,
+                Err(error) => {
+                    crate::passports::remove(&state.files, user.household_id, &storage_path).await;
+                    return Err(internal(error));
+                }
+            };
+            json!({
+                "passport_id": passport_id,
+                "pet_id": pet_id,
+                "filename": filename,
+                "mime_type": mime,
+                "download_url": format!("{origin}/passports/{passport_id}/file"),
+                "authentication_required": true,
+                "message": "Private passport scan saved. This does not establish travel eligibility."
+            })
+        }
+        "delete_pet_passport" => {
+            let passport_id = integer(&args, "passport_id")?;
+            if args.get("confirm").and_then(Value::as_bool) != Some(true) {
+                return Err((-32602, "Ask the owner to confirm permanent removal, then retry with confirm:true.".into()));
+            }
+            let document = db::delete_pet_passport(
+                &state.db,
+                user.household_id,
+                &user.audit_actor(),
+                passport_id,
+            )
+            .await
+            .map_err(internal)?
+            .ok_or((-32602, "That passport document is not in this household.".into()))?;
+            crate::passports::remove(&state.files, user.household_id, &document.storage_path).await;
+            json!({"deleted":true,"passport_id":passport_id,"pet_id":document.pet_id})
+        }
         "get_pet_timeline" => {
             let pet_id = integer(&args, "pet_id")?;
             if db::get_pet(&state.db, user.household_id, pet_id)

@@ -25,6 +25,7 @@
 - `managed` is a future hosted SaaS integration mode, not evidence of implemented checkout or paywall behavior; payment and entitlements must be server-enforced across both web and MCP when built.
 - Commercial strategy belongs in a separate private repository. Never add business strategy, pricing experiments or real production secrets here.
 - Every pet, event, share, and audit query must be household-scoped.
+- Pet passports are sensitive documents. Never include them in public vet shares, telemetry, logs, OCR, or repository fixtures. Downloads must require household authentication and uploads must be validated from file bytes (15 MB maximum). A scan is not a replacement for the physical travel document.
 - The LLM never receives database write access and never supplies authoritative timestamps.
 - Preserve the user's original health-event wording alongside structured fields.
 - Vet access must be revocable, expiring, least-privilege, and non-enumerable.
