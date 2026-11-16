@@ -12,9 +12,7 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
 };
 use chrono::{Duration, Utc};
-use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DbBackend, Statement, TransactionTrait,
-};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, TransactionTrait};
 use serde::Deserialize;
 
 const INVITE_DAYS: i64 = 7;
