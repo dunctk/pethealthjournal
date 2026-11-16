@@ -113,6 +113,7 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
             species TEXT NOT NULL,
             breed TEXT,
             date_of_birth TEXT,
+            microchip_number TEXT,
             weight_kg REAL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -465,6 +466,11 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
     .await?;
     ensure_google_sub_column(db).await?;
     ensure_column(db, "lab_reports", "original_file", "TEXT").await?;
+    ensure_column(db, "pets", "microchip_number", "TEXT").await?;
+    db.execute(stmt(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_pets_household_microchip ON pets(household_id, microchip_number) WHERE microchip_number IS NOT NULL",
+    ))
+    .await?;
 
     let now = Utc::now().to_rfc3339();
     db.execute(Statement::from_sql_and_values(
@@ -1518,7 +1524,7 @@ pub async fn update_password_and_revoke_sessions(
 pub async fn list_pets(db: &DatabaseConnection, household_id: i64) -> anyhow::Result<Vec<Pet>> {
     let rows = db.query_all(Statement::from_sql_and_values(
         DbBackend::Sqlite,
-        "SELECT id,name,species,breed,date_of_birth,weight_kg FROM pets WHERE household_id=? ORDER BY name",
+        "SELECT id,name,species,breed,date_of_birth,microchip_number,weight_kg FROM pets WHERE household_id=? ORDER BY name",
         [household_id.into()],
     )).await?;
     rows.into_iter().map(pet_from_row).collect()
@@ -1531,7 +1537,7 @@ pub async fn get_pet(
 ) -> anyhow::Result<Option<Pet>> {
     db.query_one(Statement::from_sql_and_values(
         DbBackend::Sqlite,
-        "SELECT id,name,species,breed,date_of_birth,weight_kg FROM pets WHERE household_id=? AND id=?",
+        "SELECT id,name,species,breed,date_of_birth,microchip_number,weight_kg FROM pets WHERE household_id=? AND id=?",
         [household_id.into(), id.into()],
     )).await?.map(pet_from_row).transpose()
 }
@@ -1543,7 +1549,7 @@ pub async fn find_pet_by_name(
 ) -> anyhow::Result<Option<Pet>> {
     db.query_one(Statement::from_sql_and_values(
         DbBackend::Sqlite,
-        "SELECT id,name,species,breed,date_of_birth,weight_kg FROM pets WHERE household_id=? AND name=? COLLATE NOCASE",
+        "SELECT id,name,species,breed,date_of_birth,microchip_number,weight_kg FROM pets WHERE household_id=? AND name=? COLLATE NOCASE",
         [household_id.into(), name.into()],
     )).await?.map(pet_from_row).transpose()
 }
@@ -1606,6 +1612,7 @@ pub async fn update_pet(
     species: Option<&str>,
     breed: Option<&str>,
     date_of_birth: Option<&str>,
+    microchip_number: Option<&str>,
 ) -> anyhow::Result<bool> {
     let now = Utc::now().to_rfc3339();
     let transaction = db.begin().await?;
@@ -1617,6 +1624,7 @@ pub async fn update_pet(
                  species=COALESCE(?,species),
                  breed=CASE WHEN ? IS NULL THEN breed ELSE NULLIF(?,'') END,
                  date_of_birth=CASE WHEN ? IS NULL THEN date_of_birth ELSE NULLIF(?,'') END,
+                 microchip_number=CASE WHEN ? IS NULL THEN microchip_number ELSE NULLIF(?,'') END,
                  updated_at=?
                WHERE household_id=? AND id=?"#,
             [
@@ -1626,6 +1634,8 @@ pub async fn update_pet(
                 breed.into(),
                 date_of_birth.into(),
                 date_of_birth.into(),
+                microchip_number.into(),
+                microchip_number.into(),
                 now.clone().into(),
                 household_id.into(),
                 pet_id.into(),
@@ -1636,7 +1646,8 @@ pub async fn update_pet(
         return Ok(false);
     }
     let detail = serde_json::json!({
-        "name": name, "species": species, "breed": breed, "date_of_birth": date_of_birth
+        "name": name, "species": species, "breed": breed, "date_of_birth": date_of_birth,
+        "microchip_changed": microchip_number.is_some()
     })
     .to_string();
     audit(
@@ -3868,6 +3879,7 @@ pub async fn resolve_share(
         species: row.try_get("", "species")?,
         breed: row.try_get("", "breed")?,
         date_of_birth: row.try_get("", "date_of_birth")?,
+        microchip_number: None, // Vet shares intentionally omit household-only identifiers.
         weight_kg: row.try_get("", "weight_kg")?,
         initials: initials(&row.try_get::<String>("", "pet_name")?),
     };
@@ -3918,6 +3930,7 @@ fn pet_from_row(row: QueryResult) -> anyhow::Result<Pet> {
         species: row.try_get("", "species")?,
         breed: row.try_get("", "breed")?,
         date_of_birth: row.try_get("", "date_of_birth")?,
+        microchip_number: row.try_get("", "microchip_number")?,
         weight_kg: row.try_get("", "weight_kg")?,
     })
 }

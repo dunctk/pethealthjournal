@@ -34,6 +34,7 @@ pub fn router(state: AppState) -> Router {
         .route("/app/forms/lab", get(record_form_lab))
         .route("/app/events/{id}/drawer", get(event_drawer))
         .route("/pets", post(create_pet))
+        .route("/pets/{id}/microchip", post(update_pet_microchip))
         .route("/weights", post(create_weight))
         .route("/symptoms", post(create_symptom))
         .route("/medications", post(create_medication))
@@ -1391,6 +1392,50 @@ async fn create_pet(
     )
     .await?;
     Ok(Redirect::to(&format!("/app?pet={id}")))
+}
+
+#[derive(Deserialize)]
+struct PetMicrochipForm {
+    microchip_number: String,
+}
+
+async fn update_pet_microchip(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    Path(pet_id): Path<i64>,
+    Form(form): Form<PetMicrochipForm>,
+) -> Result<Redirect, AppError> {
+    let number = form.microchip_number.trim();
+    if !number.is_empty() && !crate::domain::valid_microchip_number(number) {
+        return Err(AppError::validation(
+            "Microchip number must contain 9 to 20 digits.",
+        ));
+    }
+    let updated = db::update_pet(
+        &state.db,
+        user.household_id,
+        &user.audit_actor(),
+        pet_id,
+        None,
+        None,
+        None,
+        None,
+        Some(number),
+    )
+    .await
+    .map_err(|error| {
+        if error.to_string().contains("UNIQUE") {
+            AppError::validation(
+                "Another pet in your household already uses that microchip number.",
+            )
+        } else {
+            AppError::from(error)
+        }
+    })?;
+    if !updated {
+        return Err(AppError::not_found());
+    }
+    Ok(Redirect::to(&format!("/app?pet={pet_id}")))
 }
 
 #[derive(Deserialize)]
