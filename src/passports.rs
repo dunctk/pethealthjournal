@@ -55,14 +55,25 @@ pub async fn store(
         .collect();
     let relative = format!("passports/{pet_id}/{token}.{extension}");
     files
-        .put(&FileKey::Report { household_id, relative: &relative }, bytes.to_vec())
+        .put(
+            &FileKey::Report {
+                household_id,
+                relative: &relative,
+            },
+            bytes.to_vec(),
+        )
         .await
         .context("failed to store private passport")?;
     Ok((relative, mime, extension))
 }
 
 pub async fn remove(files: &FileStore, household_id: i64, relative: &str) {
-    files.delete(&FileKey::Report { household_id, relative }).await;
+    files
+        .delete(&FileKey::Report {
+            household_id,
+            relative,
+        })
+        .await;
 }
 
 #[cfg(test)]
@@ -71,13 +82,19 @@ mod tests {
 
     #[test]
     fn sniffs_bytes_and_preserves_simple_filename() {
-        assert_eq!(detect_type(b"%PDF-1.4\n%%EOF").unwrap(), ("application/pdf", "pdf"));
+        assert_eq!(
+            detect_type(b"%PDF-1.4\n%%EOF").unwrap(),
+            ("application/pdf", "pdf")
+        );
         assert_eq!(
             detect_type(b"\x89PNG\r\n\x1a\nrest").unwrap(),
             ("image/png", "png")
         );
         assert!(detect_type(b"<script>not a passport</script>").is_err());
-        assert_eq!(safe_filename("../scanned passport.pdf", "pdf"), "scanned passport.pdf");
+        assert_eq!(
+            safe_filename("../scanned passport.pdf", "pdf"),
+            "scanned passport.pdf"
+        );
         assert_eq!(safe_filename("", "pdf"), "pet-passport.pdf");
     }
 }

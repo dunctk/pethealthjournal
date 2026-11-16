@@ -849,16 +849,18 @@ async fn call_tool(
                 .map_err(internal)?;
             let items: Vec<Value> = documents
                 .iter()
-                .map(|doc| json!({
-                    "passport_id": doc.id,
-                    "pet_id": doc.pet_id,
-                    "label": doc.label,
-                    "filename": doc.filename,
-                    "mime_type": doc.mime_type,
-                    "uploaded_at": doc.uploaded_at,
-                    "download_url": format!("{origin}/passports/{}/file", doc.id),
-                    "authentication_required": true
-                }))
+                .map(|doc| {
+                    json!({
+                        "passport_id": doc.id,
+                        "pet_id": doc.pet_id,
+                        "label": doc.label,
+                        "filename": doc.filename,
+                        "mime_type": doc.mime_type,
+                        "uploaded_at": doc.uploaded_at,
+                        "download_url": format!("{origin}/passports/{}/file", doc.id),
+                        "authentication_required": true
+                    })
+                })
                 .collect();
             json!({"items": items})
         }
@@ -868,8 +870,8 @@ async fn call_tool(
                 .await
                 .map_err(internal)?
                 .ok_or((-32602, "That pet is not in this household.".into()))?;
-            let label = bounded_text(args.get("label"), "label", 100)
-                .map_err(|error| (-32602, error))?;
+            let label =
+                bounded_text(args.get("label"), "label", 100).map_err(|error| (-32602, error))?;
             let filename = bounded_text(args.get("filename"), "filename", 120)
                 .map_err(|error| (-32602, error))?;
             let attached_url = args
@@ -878,15 +880,23 @@ async fn call_tool(
                 .and_then(Value::as_str);
             let base64_content = args.get("content_base64").and_then(Value::as_str);
             if attached_url.is_some() == base64_content.is_some() {
-                return Err((-32602, "Supply either an attached passport_file or content_base64, but not both.".into()));
+                return Err((
+                    -32602,
+                    "Supply either an attached passport_file or content_base64, but not both."
+                        .into(),
+                ));
             }
             let bytes = if let Some(url) = attached_url {
-                let (bytes, _) = crate::ocr::fetch_client_file(url)
-                    .await
-                    .map_err(|error| (-32602, format!("Could not access attached passport file: {error}")))?;
+                let (bytes, _) = crate::ocr::fetch_client_file(url).await.map_err(|error| {
+                    (
+                        -32602,
+                        format!("Could not access attached passport file: {error}"),
+                    )
+                })?;
                 bytes
             } else {
-                let content = base64_content.ok_or((-32602, "Missing passport file.".to_owned()))?;
+                let content =
+                    base64_content.ok_or((-32602, "Missing passport file.".to_owned()))?;
                 if content.len() > crate::passports::MAX_PASSPORT_BYTES * 4 / 3 + 16 {
                     return Err((-32602, "Passport upload is too large (15 MB max).".into()));
                 }
@@ -894,18 +904,12 @@ async fn call_tool(
                     .decode(content)
                     .map_err(|_| (-32602, "content_base64 is invalid.".into()))?
             };
-            let (storage_path, mime, extension) = crate::passports::store(
-                &state.files,
-                user.household_id,
-                pet_id,
-                &bytes,
-            )
-            .await
-            .map_err(|error| (-32602, error.to_string()))?;
-            let filename = crate::passports::safe_filename(
-                filename.as_deref().unwrap_or(""),
-                extension,
-            );
+            let (storage_path, mime, extension) =
+                crate::passports::store(&state.files, user.household_id, pet_id, &bytes)
+                    .await
+                    .map_err(|error| (-32602, error.to_string()))?;
+            let filename =
+                crate::passports::safe_filename(filename.as_deref().unwrap_or(""), extension);
             let saved = db::create_pet_passport(
                 &state.db,
                 user.household_id,
@@ -937,7 +941,11 @@ async fn call_tool(
         "delete_pet_passport" => {
             let passport_id = integer(&args, "passport_id")?;
             if args.get("confirm").and_then(Value::as_bool) != Some(true) {
-                return Err((-32602, "Ask the owner to confirm permanent removal, then retry with confirm:true.".into()));
+                return Err((
+                    -32602,
+                    "Ask the owner to confirm permanent removal, then retry with confirm:true."
+                        .into(),
+                ));
             }
             let document = db::delete_pet_passport(
                 &state.db,
@@ -947,7 +955,10 @@ async fn call_tool(
             )
             .await
             .map_err(internal)?
-            .ok_or((-32602, "That passport document is not in this household.".into()))?;
+            .ok_or((
+                -32602,
+                "That passport document is not in this household.".into(),
+            ))?;
             crate::passports::remove(&state.files, user.household_id, &document.storage_path).await;
             json!({"deleted":true,"passport_id":passport_id,"pet_id":document.pet_id})
         }

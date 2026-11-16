@@ -1738,7 +1738,11 @@ async fn upload_pet_passport(
     while let Some(field) = multipart.next_field().await? {
         match field.name() {
             Some("pet_id") => {
-                pet_id = field.text().await.ok().and_then(|text| text.parse::<i64>().ok());
+                pet_id = field
+                    .text()
+                    .await
+                    .ok()
+                    .and_then(|text| text.parse::<i64>().ok());
             }
             Some("label") => {
                 label = Some(field.text().await?);
@@ -1757,17 +1761,15 @@ async fn upload_pet_passport(
         .ok_or_else(AppError::not_found)?;
     let label = label.as_deref().map(str::trim).filter(|v| !v.is_empty());
     if label.is_some_and(|v| v.chars().count() > 100) {
-        return Err(AppError::validation("The document label must be under 100 characters."));
+        return Err(AppError::validation(
+            "The document label must be under 100 characters.",
+        ));
     }
-    let (filename, bytes) = uploaded.ok_or_else(|| AppError::validation("Choose a PDF or passport photo."))?;
-    let (path, mime, extension) = passports::store(
-        &state.files,
-        user.household_id,
-        pet_id,
-        &bytes,
-    )
-    .await
-    .map_err(|error| AppError::validation(error.to_string()))?;
+    let (filename, bytes) =
+        uploaded.ok_or_else(|| AppError::validation("Choose a PDF or passport photo."))?;
+    let (path, mime, extension) = passports::store(&state.files, user.household_id, pet_id, &bytes)
+        .await
+        .map_err(|error| AppError::validation(error.to_string()))?;
     let filename = passports::safe_filename(&filename, extension);
     if let Err(error) = db::create_pet_passport(
         &state.db,
@@ -1795,7 +1797,8 @@ async fn download_pet_passport(
     let passport = db::get_pet_passport(&state.db, user.household_id, passport_id)
         .await?
         .ok_or_else(AppError::not_found)?;
-    let bytes = state.files
+    let bytes = state
+        .files
         .get(&crate::storage::FileKey::Report {
             household_id: user.household_id,
             relative: &passport.storage_path,
@@ -1812,15 +1815,24 @@ async fn download_pet_passport(
     let mut response = bytes.into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(&passport.mime_type).unwrap_or(HeaderValue::from_static("application/octet-stream")),
+        HeaderValue::from_str(&passport.mime_type)
+            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
     );
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&format!("attachment; filename=\"pet-passport.{extension}\""))
-            .unwrap_or(HeaderValue::from_static("attachment")),
+        HeaderValue::from_str(&format!(
+            "attachment; filename=\"pet-passport.{extension}\""
+        ))
+        .unwrap_or(HeaderValue::from_static("attachment")),
     );
-    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
-    response.headers_mut().insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    response.headers_mut().insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
     Ok(response)
 }
 
@@ -1831,11 +1843,19 @@ async fn delete_pet_passport_route(
     Path(passport_id): Path<i64>,
 ) -> Result<Redirect, AppError> {
     require_form_origin(&state, &headers)?;
-    let removed = db::delete_pet_passport(&state.db, user.household_id, &user.audit_actor(), passport_id)
-        .await?
-        .ok_or_else(AppError::not_found)?;
+    let removed = db::delete_pet_passport(
+        &state.db,
+        user.household_id,
+        &user.audit_actor(),
+        passport_id,
+    )
+    .await?
+    .ok_or_else(AppError::not_found)?;
     passports::remove(&state.files, user.household_id, &removed.storage_path).await;
-    Ok(Redirect::to(&format!("/app?pet={}&view=passports", removed.pet_id)))
+    Ok(Redirect::to(&format!(
+        "/app?pet={}&view=passports",
+        removed.pet_id
+    )))
 }
 
 async fn upload_photo(

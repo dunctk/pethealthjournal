@@ -1860,7 +1860,6 @@ pub async fn delete_weight(
     Ok(Some(serde_json::from_str(&snapshot)?))
 }
 
-
 pub async fn create_pet_passport(
     db: &DatabaseConnection,
     household_id: i64,
