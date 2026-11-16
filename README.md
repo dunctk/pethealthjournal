@@ -58,6 +58,16 @@ For Codex, add the same URL as a remote MCP server. The client can discover the 
 
 If the client is running over SSH without a display, use the device-code fallback: the client posts its PKCE challenge to `/oauth/device`, prints the returned `user_code`, and polls `/oauth/token` with the returned `device_code`. Open the returned `verification_uri` on any phone or computer, enter the code, sign in, and approve. The code expires after 10 minutes and can be used once.
 
+## Shared households and passwordless invitations
+
+Household owners can open **Account settings → Manage household** to invite another person by email. Invitations expire after seven days and can only be accepted once. Visiting or previewing a link does not use it; the recipient explicitly clicks **Accept invitation and sign in**. The app creates a separate member identity in the *same household*, sets an HttpOnly, SameSite=Lax session cookie (Secure in production), and opens the shared pet dashboard. Later sign-ins use email codes or configured Google login rather than a shared password.
+
+- Configure outbound SMTP and EMAIL_FROM, and set APP_BASE_URL to the externally accessible HTTPS application origin before sending invitations. The app refuses to email authentication links with an unconfigured origin or a non-HTTPS production origin.
+- Owners can revoke pending invitations and remove members. Removing a member invalidates their sessions, personal MCP tokens and OAuth grants without deleting household pet records. Audit events record joins and removals.
+- Every member separately authorizes their preferred MCP client through /mcp using the existing OAuth consent. Compatibility with the consumer Gemini app depends on Google's current availability and MCP support.
+- Invite links are secrets: stored only as hashes, never listed in account settings, and never consumed on GET, so email preview scanners cannot claim the invitation.
+- Existing accounts cannot silently be transferred between households. Such moves currently require administrator-assisted migration rather than a standard invite.
+
 ## Run locally
 
 ```bash
