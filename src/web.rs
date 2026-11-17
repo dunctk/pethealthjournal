@@ -1531,7 +1531,7 @@ async fn create_symptom(
         .await?
         .ok_or_else(AppError::not_found)?;
     let symptom = clean_required(&form.symptom, 60, "Symptom")?;
-    if !matches!(symptom, "vomiting" | "diarrhea" | "reduced_appetite") {
+    if !matches!(symptom, "vomiting" | "diarrhea" | "reduced_appetite" | "wheezing" | "nasal_discharge" | "nasal_congestion" | "eye_discharge" | "coughing" | "labored_breathing") {
         return Err(AppError::validation("Choose a supported symptom."));
     }
     let count = form
