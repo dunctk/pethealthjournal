@@ -23,6 +23,7 @@ mod passports;
 mod photos;
 mod storage;
 mod web;
+mod vet_share;
 
 use anyhow::Context;
 use config::Config;
