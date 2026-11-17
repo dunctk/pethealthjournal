@@ -459,3 +459,66 @@ input::placeholder { color: #586168; }
   .passport-file-actions > a, .passport-file-actions > form { flex: 1; }
   .passport-file-actions form button { width: 100%; }
 }
+
+
+/* Read-only veterinary share: clickable longitudinal record and lab trend series. */
+.vet-record { width: min(68rem, calc(100% - 2rem)); }
+.vet-record .pet-header { margin-bottom: 1rem; }
+.vet-jump-nav, .vet-marker-index { display: flex; flex-wrap: wrap; gap: .5rem; margin: 1rem 0; }
+.vet-jump-nav a, .vet-marker-index a, .vet-case-links a { display: inline-flex; align-items: center; gap: .45rem; padding: .55rem .8rem; color: var(--soft); background: var(--surface); border: 1px solid var(--line); border-radius: .5rem; font-size: .78rem; }
+.vet-jump-nav a:hover, .vet-marker-index a:hover, .vet-case-links a:hover { color: var(--text); border-color: var(--active); }
+.vet-marker-index small, .vet-jump-nav small { color: var(--active); }
+.vet-panel { margin: 2rem 0 3rem; min-width: 0; scroll-margin-top: 1rem; }
+.vet-help { margin: .8rem 0 1rem; color: var(--soft); font-size: .8rem; line-height: 1.6; }
+.vet-muted, .vet-empty { color: var(--muted); font-size: .78rem; }
+.vet-detail, .vet-marker { border: 1px solid var(--line); border-radius: .6rem; margin: .7rem 0; background: var(--raised); min-width: 0; }
+.vet-detail > summary, .vet-marker > summary { display: flex; gap: .85rem; align-items: center; padding: 1rem; cursor: pointer; list-style: none; }
+.vet-detail > summary::-webkit-details-marker, .vet-marker > summary::-webkit-details-marker, .vet-timeline-entry > summary::-webkit-details-marker { display: none; }
+.vet-detail > summary:hover, .vet-marker > summary:hover, .vet-timeline-entry > summary:hover { background: var(--surface-2); }
+.vet-detail[open], .vet-marker[open], .vet-timeline-entry[open] { border-color: var(--line-strong); }
+.vet-detail-main, .vet-marker > summary > span:first-child { flex: 1; display: grid; gap: .3rem; min-width: 0; }
+.vet-detail-main strong, .vet-marker strong { font-size: .94rem; overflow-wrap: anywhere; }
+.vet-detail-main small, .vet-marker small { color: var(--muted); font-size: .75rem; overflow-wrap: anywhere; }
+.vet-chip { display: inline-flex; padding: .22rem .5rem; color: var(--info); background: var(--info-dim); border: 1px solid #315b77; border-radius: 99px; font: 700 .62rem/1.2 var(--mono); white-space: normal; overflow-wrap: anywhere; }
+.vet-chevron { color: var(--muted); font-size: 1.25rem; margin-left: auto; transition: transform 120ms; }
+details[open] > summary .vet-chevron { transform: rotate(180deg); }
+.vet-detail-body { padding: 0 1rem 1rem; font-size: .82rem; color: var(--soft); }
+.vet-detail-body h3 { font-size: .85rem; color: var(--text); margin: 1.2rem 0 .5rem; }
+.vet-detail-body p { overflow-wrap: anywhere; }
+.vet-hypothesis { border-left: 2px solid var(--line-strong); padding: .4rem .9rem; margin: .65rem 0; }
+.vet-hypothesis strong { color: var(--text); }
+.vet-hypothesis small { color: var(--muted); }
+.vet-case-links { display: flex; flex-wrap: wrap; gap: .45rem; }
+.vet-timeline { margin-top: 1rem; padding-left: .15rem; }
+.vet-timeline-entry { position: relative; border-left: 1px solid var(--line-strong); margin-left: 1rem; border-bottom: 1px solid var(--line); scroll-margin-top: 1rem; }
+.vet-timeline-entry > summary { display: flex; align-items: center; gap: .75rem; padding: .85rem .65rem .85rem 1.1rem; cursor: pointer; list-style: none; border-radius: .3rem; }
+.vet-time-rail { position: absolute; left: -.35rem; top: 1.05rem; display: grid; place-items: center; height: .7rem; width: .7rem; border-radius: 50%; border: 2px solid var(--active); background: #050606; }
+.vet-entry-heading { display: grid; gap: .32rem; flex: 1; min-width: 0; }
+.vet-entry-meta { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; color: var(--soft); font-size: .73rem; }
+.vet-entry-heading strong { font-size: .92rem; overflow-wrap: anywhere; }
+.vet-entry-heading small { font-size: .68rem; color: var(--muted); }
+.vet-timeline-detail { padding: .3rem .85rem 1rem 1.1rem; min-width: 0; }
+.vet-timeline-detail blockquote { border-left: 2px solid var(--active); padding: .5rem .75rem; margin: .4rem 0 .8rem; color: var(--soft); background: var(--surface); font-size: .83rem; overflow-wrap: anywhere; }
+.vet-facts { display: grid; margin: .4rem 0; }
+.vet-facts > div { display: grid; grid-template-columns: minmax(7rem, 30%) minmax(0, 1fr); gap: .7rem; padding: .5rem 0; border-bottom: 1px solid var(--line); font-size: .78rem; }
+.vet-facts dt { color: var(--muted); }
+.vet-facts dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
+.vet-source { color: var(--muted); font-size: .72rem; margin: .9rem 0 0; }
+.vet-marker-content { padding: 0 1rem 1rem; }
+.vet-chart { display: block; width: 100%; height: auto; max-height: 22rem; background: var(--surface); border: 1px solid var(--line); border-radius: .5rem; padding: .4rem; color: var(--soft); }
+.vet-table-scroll { overflow-x: auto; max-width: 100%; margin-top: .8rem; }
+.vet-marker-table { width: 100%; border-collapse: collapse; font-size: .75rem; text-align: left; }
+.vet-marker-table caption { text-align: left; color: var(--muted); font-size: .72rem; margin: .3rem 0 .65rem; }
+.vet-marker-table th, .vet-marker-table td { padding: .65rem .6rem; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.vet-marker-table th { color: var(--soft); background: var(--surface); font-weight: 650; }
+.vet-marker-table a { color: var(--info); text-decoration: underline; }
+.vet-marker:target, .vet-timeline-entry:target { outline: 2px solid var(--active); outline-offset: 2px; }
+@media (max-width: 600px) {
+  .vet-view .shared-top .brand { font-size: .8rem; padding: 0 .75rem; }
+  .vet-view .readonly-badge { margin-right: .6rem; font-size: .52rem; }
+  .vet-jump-nav a { flex: 1 1 calc(50% - .5rem); justify-content: center; }
+  .vet-panel { margin: 1.7rem 0 2.2rem; }
+  .vet-entry-meta { font-size: .65rem; }
+  .vet-facts > div { grid-template-columns: 1fr; gap: .15rem; }
+  .vet-marker-content { padding: 0 .5rem .7rem; }
+}

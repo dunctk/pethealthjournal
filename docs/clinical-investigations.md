@@ -35,3 +35,19 @@ Do not invent onset dates, antibiotics or dosage history, veterinary conclusions
 Run cargo fmt --check, cargo check --all-targets, cargo test, and review owner form and vet share at mobile/desktop sizes. MCP e2e exercises isolation and confirmation paths.
 
 The printable case brief intentionally labels recent general health events separately from case-specific entries; they may be unrelated to the presenting problem.
+
+
+## Interactive veterinary share viewer (read-only)
+
+The existing short-lived /share/{token} link now presents:
+
+- Clinical investigations and their hypothesis status (labelled as owner-reported, not veterinary-authenticated), with navigation to individual case updates.
+- A unified reverse-chronological timeline of health events, structured symptom detail, doses administered, weight measurements, laboratory reports and investigation notes. Each event can be expanded via a keyboard-operable native HTML details/summary control. The page includes up to the newest 400 ordinary record entries plus case updates; case updates with unknown observation dates are labelled with their recorded date rather than presented as a confirmed onset.
+- Laboratory charts grouped using the existing analyte name/unit normalizer. Known values from different labs are converted at read time into canonical units without modifying the printed values. Unknown/incompatible units remain separate. Missing dates and non-numeric results are listed in accessible tables without false chart points. Labs retain their original per-report reference ranges and flags: the charts do not claim a single universal normal range.
+- The current and historical prescription plan as a distinct section, never conflated with individual administrations.
+
+**Privacy boundary:** The existing share-token resolver runs on every request, so revoked and expired links deny all sections. The route is read-only and uses no new public data endpoints, external charting scripts, image uploads, or model calls. The page doesn't expose private passport images, microchip IDs, account details, or original lab-file download URLs. Existing no-store, no-referrer and strict CSP headers apply.
+
+Render validation: compare at desktop and mobile widths, expand each clinical row and marker, inspect graph point details and tables, and confirm revoked links return not found. The server-side charts are informational only; the veterinarian should confirm clinical interpretation from the source report.
+
+Chart points have tooltips for pointer users, and every underlying measurement is available in the table for keyboard and assistive-technology users. Lab-report links target the expandable timeline report details.

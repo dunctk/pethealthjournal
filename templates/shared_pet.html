@@ -1,16 +1,175 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark"><title>{{ pet.name }} · Shared pet record</title><link rel="stylesheet" href="/static/app.css"></head>
-<body class="shared-page"><header class="shared-top"><span class="brand"><img class="brand-mark" src="/static/logo.svg" alt="">Pet Health Journal</span><span class="readonly-badge">SHARED PET HISTORY</span></header>
-<main class="shared-record"><section class="pet-header"><div><div class="eyebrow">SHARED BY PET OWNER</div><h1>{{ pet.name }}</h1><p>{{ pet.species }}{% match pet.breed %}{% when Some with (breed) %} · {{ breed }}{% when None %}{% endmatch %}</p></div></section>
-<div class="share-notice">This history was shared with <b>{{ grant.label }}</b>. The owner can stop access at any time. This link expires {{ grant.expires_at }}.</div>
-<section class="timeline-region"><div class="section-head"><div><span class="eyebrow">CLINICAL INVESTIGATIONS</span><h2>Open concerns and vet questions</h2></div></div>
-<p>Owner-maintained case notes and possible explanations. Nothing here is a diagnosis. Veterinary remarks are the owner's account unless confirmed in clinical records.</p>
-{% if cases.is_empty() %}<p>No clinical investigations recorded.</p>{% endif %}
-{% for case in cases %}
-<article class="event-row"><div class="event-body"><h3>{{ case.investigation.title }} <small>({{ case.investigation.status }})</small></h3><p>{{ case.investigation.presenting_concern }}</p>
-<h4>Symptom, treatment and response timeline</h4>
-{% for item in case.updates %}<p><b>{{ item.kind }}:</b> {% match item.observed_on %}{% when Some with (date) %}{{ date }}{% when None %}Date unknown{% endmatch %} — {{ item.original_wording }} <small>({% if item.source == "owner_relayed_vet" %}owner relaying vet{% else %}owner{% endif %})</small></p>{% endfor %}
-<h4>Possible explanations (not diagnoses)</h4>
-{% for hypothesis in case.hypotheses %}<p>{{ hypothesis.label }} — {{ hypothesis.status }}{% match hypothesis.rationale %}{% when Some with (r) %}: {{ r }}{% when None %}{% endmatch %} <small>({% if hypothesis.reported_by == "owner_relayed_vet" %}owner relaying vet{% else %}owner question{% endif %})</small></p>{% endfor %}
-</div></article>{% endfor %}</section>
-<section class="timeline-region"><div class="section-head"><div><span class="eyebrow">PET HEALTH HISTORY</span><h2>Timeline</h2></div><span>{{ events.len() }} events</span></div><div class="timeline">{% for event in events %}<article class="event-row"><div class="event-rail"><span class="event-icon {{ event.tone }}">{{ event.icon }}</span><i></i></div><div class="event-body"><div class="event-meta"><span class="type {{ event.tone }}">{{ event.event_type }}</span><time>{{ event.occurred_label }}</time></div><h3>{{ event.summary }}</h3><p>“{{ event.raw_input }}”</p></div></article>{% endfor %}</div></section>
-<p class="medical-note">This history can help with care, but it does not replace an exam or advice from a veterinary professional.</p></main></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <meta name="referrer" content="no-referrer">
+  <title>{{ pet.name }} · Shared veterinary record</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="shared-page vet-view">
+<header class="shared-top">
+  <span class="brand"><img class="brand-mark" src="/static/logo.svg" alt="">Pet Health Journal</span>
+  <span class="readonly-badge">READ-ONLY VET RECORD</span>
+</header>
+<main class="shared-record vet-record">
+  <section class="pet-header">
+    <div>
+      <div class="eyebrow">HEALTH HISTORY / {{ pet.species|upper }}</div>
+      <h1>{{ pet.name }}</h1>
+      <p>{{ pet.species }}{% match pet.breed %}{% when Some with (breed) %} · {{ breed }}{% when None %}{% endmatch %}</p>
+    </div>
+  </section>
+  <div class="share-notice">
+    Shared with <strong>{{ grant.label }}</strong>. Owner-controlled access; expires {{ grant.expires_at }} and can be revoked at any time.
+    All dates, observations, and vet statements should be verified against clinical records.
+  </div>
+
+  <nav class="vet-jump-nav" aria-label="Veterinary record sections">
+    <a href="#investigations">Investigations <small>{{ cases.len() }}</small></a>
+    <a href="#clinical-timeline">Timeline <small>{{ timeline.len() }}</small></a>
+    <a href="#blood-markers">Blood markers <small>{{ charts.len() }}</small></a>
+    <a href="#prescriptions">Prescriptions</a>
+  </nav>
+
+  <section class="vet-panel" id="investigations">
+    <div class="section-head">
+      <div><span class="eyebrow">PROBLEM-ORIENTED RECORD</span><h2>Clinical investigations</h2></div>
+    </div>
+    <p class="vet-help">Ongoing concerns, possible explanations and questions. Hypotheses are not diagnoses. Veterinary assessments are relayed by the owner, not independently verified.</p>
+    {% if cases.is_empty() %}<p class="vet-empty">No investigations have been recorded.</p>{% endif %}
+    {% for case in cases %}
+    <details class="vet-detail">
+      <summary>
+        <span class="vet-detail-main"><strong>{{ case.investigation.title }}</strong><small>{{ case.investigation.presenting_concern }}</small></span>
+        <span class="vet-chip">{{ case.investigation.status }}</span>
+        <span class="vet-chevron" aria-hidden="true">⌄</span>
+      </summary>
+      <div class="vet-detail-body">
+        <h3>Questions and differential considerations</h3>
+        {% if case.hypotheses.is_empty() %}<p>No possibilities recorded yet.</p>{% endif %}
+        {% for hypothesis in case.hypotheses %}
+        <div class="vet-hypothesis"><div><strong>{{ hypothesis.label }}</strong> <span class="vet-chip">{{ hypothesis.status }}</span></div>
+          {% match hypothesis.rationale %}{% when Some with (rationale) %}<p>{{ rationale }}</p>{% when None %}{% endmatch %}
+          <small>{% if hypothesis.reported_by == "owner_relayed_vet" %}Owner relaying a veterinary assessment{% else %}Owner question — unverified{% endif %}</small>
+        </div>{% endfor %}
+        <h3>Case updates in timeline</h3>
+        {% if case.updates.is_empty() %}<p>No case updates recorded.</p>{% endif %}
+        <div class="vet-case-links">
+          {% for update in case.updates %}
+          <a href="#case-{{ case.investigation.id }}-update-{{ update.id }}">{{ update.kind }} · {% match update.observed_on %}{% when Some with (date) %}{{ date }}{% when None %}date unknown{% endmatch %}</a>
+          {% endfor %}
+        </div>
+      </div>
+    </details>
+    {% endfor %}
+  </section>
+
+  <section class="vet-panel" id="clinical-timeline">
+    <div class="section-head">
+      <div><span class="eyebrow">CHRONOLOGICAL HISTORY</span><h2>Health timeline</h2></div>
+      <span class="vet-muted">Click an entry for details</span>
+    </div>
+    <p class="vet-help">One timeline of symptoms, medications given, weight readings, lab reports and investigation notes. This view includes up to {{ timeline_limit }} recent health records plus the recorded investigation updates. Missing observation dates use their recorded date and are explicitly labelled.</p>
+    {% if timeline.is_empty() %}<p class="vet-empty">No health history has been recorded yet.</p>{% endif %}
+    <div class="vet-timeline">
+      {% for entry in timeline %}
+      <details class="vet-timeline-entry" id="{{ entry.anchor }}">
+        <summary>
+          <span class="vet-time-rail" aria-hidden="true"><span></span></span>
+          <span class="vet-entry-heading">
+            <span class="vet-entry-meta"><span class="vet-chip">{{ entry.kind }}</span><time>{{ entry.date_label }}</time></span>
+            <strong>{{ entry.title }}</strong>
+            <small>{{ entry.date_note }}</small>
+          </span>
+          <span class="vet-chevron" aria-hidden="true">⌄</span>
+        </summary>
+        <div class="vet-timeline-detail">
+          {% if !entry.original_words.is_empty() %}<blockquote>“{{ entry.original_words }}”</blockquote>{% endif %}
+          {% if !entry.facts.is_empty() %}
+          <dl class="vet-facts">
+            {% for item in entry.facts %}<div><dt>{{ item.label }}</dt><dd>{{ item.value }}</dd></div>{% endfor %}
+          </dl>
+          {% endif %}
+          <p class="vet-source">Source: {{ entry.provenance }}</p>
+        </div>
+      </details>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="vet-panel" id="blood-markers">
+    <div class="section-head">
+      <div><span class="eyebrow">LABORATORY HISTORY</span><h2>Blood-marker trends</h2></div>
+    </div>
+    <p class="vet-help">Each marker is plotted independently. Where the stored analyte and units are recognized, the values use a common unit for comparison. Unknown or incompatible units stay in separate series. Hover or focus on points for details, or read the accessible values table beneath each chart.</p>
+    <p class="vet-help">Original lab values, reference ranges and flags appear below each chart. Reference ranges can vary by lab and are <strong>not</strong> pooled into one universal normal range. A change does not establish a diagnosis.</p>
+    {% if charts.is_empty() %}<p class="vet-empty">No blood-test markers have been recorded.</p>{% else %}
+    <nav class="vet-marker-index" aria-label="Jump to blood marker">
+      {% for chart in charts %}<a href="#marker-{{ loop.index }}">{{ chart.label }} <small>{{ chart.observations.len() }}</small></a>{% endfor %}
+    </nav>
+    {% for chart in charts %}
+    <details class="vet-marker" id="marker-{{ loop.index }}">
+      <summary>
+        <span><strong>{{ chart.label }}</strong><small>{{ chart.unit }} · {{ chart.observations.len() }} recorded value(s)</small></span>
+        <span class="vet-chevron" aria-hidden="true">⌄</span>
+      </summary>
+      <div class="vet-marker-content">
+        {% if chart.chart_points.is_empty() %}
+        <p class="vet-muted">No reliable date-and-numeric-value pair available to chart. Results are listed below.</p>
+        {% else %}
+        <svg class="vet-chart" viewBox="0 0 600 218" role="img" aria-label="{{ chart.label }} trend in {{ chart.unit }}; data values listed in table below" xmlns="http://www.w3.org/2000/svg">
+          <line x1="44" y1="34" x2="44" y2="170" stroke="currentColor" opacity=".3"/>
+          <line x1="44" y1="170" x2="556" y2="170" stroke="currentColor" opacity=".3"/>
+          <line x1="44" y1="102" x2="556" y2="102" stroke="currentColor" opacity=".14" stroke-dasharray="4 5"/>
+          <text x="40" y="36" text-anchor="end" fill="currentColor" font-size="12">{{ chart.max_label }}</text>
+          <text x="40" y="173" text-anchor="end" fill="currentColor" font-size="12">{{ chart.min_label }}</text>
+          {% if chart.show_line %}<polyline points="{{ chart.line }}" fill="none" stroke="#7cc8b0" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>{% endif %}
+          {% for point in chart.chart_points %}
+          <circle cx="{{ point.x }}" cy="{{ point.y }}" r="6" fill="#8ae4bf" stroke="#162f28" stroke-width="2">
+            <title>{{ point.tooltip }}</title>
+          </circle>{% endfor %}
+          <text x="44" y="200" text-anchor="start" fill="currentColor" font-size="12">{{ chart.start_label }}</text>
+          <text x="556" y="200" text-anchor="end" fill="currentColor" font-size="12">{{ chart.end_label }}</text>
+        </svg>
+        {% endif %}
+        <div class="vet-table-scroll"><table class="vet-marker-table">
+          <caption>Reported {{ chart.label }} measurements and the reference range supplied with each lab result</caption>
+          <thead><tr><th scope="col">Test date</th><th scope="col">Reported name</th><th scope="col">Reported result</th><th scope="col">Reference range</th><th scope="col">Lab flag</th><th scope="col">Record</th></tr></thead>
+          <tbody>{% for point in chart.observations %}
+          <tr><td>{{ point.test_date }}</td><td>{{ point.printed_name }}</td><td>{{ point.printed_value }} {{ point.printed_unit }}</td><td>{{ point.reference_range }}</td><td>{{ point.flag }}</td><td><a href="#lab-{{ point.report_id }}">Lab report</a></td></tr>
+          {% endfor %}</tbody>
+        </table></div>
+      </div>
+    </details>
+    {% endfor %}
+    {% endif %}
+  </section>
+
+  <section class="vet-panel" id="prescriptions">
+    <div class="section-head"><div><span class="eyebrow">TREATMENT CONTEXT</span><h2>Prescription history</h2></div></div>
+    <p class="vet-help">Prescribed medication plans are separate from individual doses recorded in the timeline. This page does not recommend any medication changes.</p>
+    {% if prescriptions.is_empty() %}<p class="vet-empty">No prescriptions recorded.</p>{% endif %}
+    {% for med in prescriptions %}
+    <details class="vet-detail">
+      <summary><span class="vet-detail-main"><strong>{{ med.name }}</strong><small>{{ med.status }}{% match med.started_on %}{% when Some with (date) %} · Started {{ date }}{% when None %} · Start unknown{% endmatch %}</small></span><span class="vet-chevron" aria-hidden="true">⌄</span></summary>
+      <div class="vet-detail-body">
+        <dl class="vet-facts">
+          {% match med.active_ingredient %}{% when Some with (ingredient) %}<div><dt>Ingredient</dt><dd>{{ ingredient }}</dd></div>{% when None %}{% endmatch %}
+          {% match med.dose_value %}{% when Some with (dose) %}<div><dt>Prescribed dose</dt><dd>{{ dose }}{% match med.dose_unit %}{% when Some with (unit) %} {{ unit }}{% when None %}{% endmatch %}</dd></div>{% when None %}{% endmatch %}
+          {% match med.frequency %}{% when Some with (frequency) %}<div><dt>Frequency</dt><dd>{{ frequency }}</dd></div>{% when None %}{% endmatch %}
+          {% match med.route %}{% when Some with (route) %}<div><dt>Route</dt><dd>{{ route }}</dd></div>{% when None %}{% endmatch %}
+          {% match med.ended_on %}{% when Some with (date) %}<div><dt>End date</dt><dd>{{ date }}</dd></div>{% when None %}{% endmatch %}
+          {% match med.instructions %}{% when Some with (note) %}<div><dt>Instructions</dt><dd>{{ note }}</dd></div>{% when None %}{% endmatch %}
+          {% match med.raw_input %}{% when Some with (note) %}<div><dt>Owner's wording</dt><dd>{{ note }}</dd></div>{% when None %}{% endmatch %}
+        </dl>
+      </div>
+    </details>{% endfor %}
+  </section>
+
+  <p class="medical-note">This information is shared by the pet owner to help a veterinary professional review care. It is not a replacement for an examination, diagnosis or emergency assessment. Passport documents, microchip numbers, original private document downloads and household account details are not included.</p>
+</main>
+</body>
+</html>

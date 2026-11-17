@@ -457,7 +457,28 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
     let url = share["url"].as_str().unwrap();
     assert!(url.starts_with("http://app.test/share/"), "{url}");
     let path = url.trim_start_matches("http://app.test");
-    assert_eq!(h.get(path).await.0, StatusCode::OK);
+    let (share_status, share_body) = h.get(path).await;
+    assert_eq!(share_status, StatusCode::OK);
+    assert!(share_body.contains("id=\"clinical-timeline\""));
+    assert!(share_body.contains("id=\"blood-markers\""));
+    assert!(share_body.contains("vet-timeline-entry"));
+    assert!(
+        share_body.contains("vet-chart"),
+        "blood markers should render an SVG chart"
+    );
+    assert!(
+        share_body.contains("Creatinine"),
+        "lab analyte aliases should be unified"
+    );
+    assert!(share_body.contains("Prescription history"));
+    assert!(
+        !share_body.contains("009123456789012"),
+        "private microchip must not be exposed"
+    );
+    assert!(
+        !share_body.contains("href=\"/passports/"),
+        "passports must not be shared"
+    );
     let listed_shares = h.ok(&owner, "list_vet_shares", json!({})).await;
     assert_eq!(listed_shares["shares"][0]["status"], "active");
     assert!(
@@ -556,6 +577,29 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
         .await;
     h.err(&stranger, "get_vet_case_brief", json!({"case_id":case_id}))
         .await;
+
+    // A new share shows investigation entries in the same chronological timeline.
+    let case_share = h
+        .ok(
+            &owner,
+            "create_vet_share",
+            json!({"pet_id":pet_id,"label":"Clinical case review","days":1,"confirm":true}),
+        )
+        .await;
+    let case_url = case_share["url"].as_str().unwrap();
+    let case_path = case_url.trim_start_matches("http://app.test");
+    let (case_status, case_body) = h.get(case_path).await;
+    assert_eq!(case_status, StatusCode::OK);
+    assert!(case_body.contains("Persistent upper respiratory signs"));
+    assert!(case_body.contains("Occasional wheezing"));
+    assert!(case_body.contains(&format!("case-{case_id}-update-")));
+    h.ok(
+        &owner,
+        "revoke_vet_share",
+        json!({"share_id":case_share["share_id"]}),
+    )
+    .await;
+    assert_ne!(h.get(case_path).await.0, StatusCode::OK);
 
     // Deleting a pet requires the exact name, then removes everything.
     let refused = h

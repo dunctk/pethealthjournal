@@ -3350,7 +3350,19 @@ async fn shared_pet(
     let (grant, pet) = db::resolve_share(&state.db, &token)
         .await?
         .ok_or_else(AppError::not_found)?;
-    let events = db::list_events(&state.db, grant.household_id, Some(pet.id), 100).await?;
+    // All private tables are read only after token resolution; this same GET
+    // is checked again on every access, so expiry and revocation apply to all details.
+    const SHARE_TIMELINE_LIMIT: u64 = 400;
+    let entries = db::list_timeline(
+        &state.db,
+        grant.household_id,
+        pet.id,
+        None,
+        SHARE_TIMELINE_LIMIT,
+    )
+    .await?;
+    let lab_reports = db::list_lab_reports(&state.db, grant.household_id, pet.id).await?;
+    let prescriptions = db::list_prescriptions(&state.db, grant.household_id, pet.id, 80).await?;
     let listed = crate::clinical_cases::list(&state.db, grant.household_id, pet.id).await?;
     let mut cases = Vec::new();
     for investigation in listed {
@@ -3360,11 +3372,16 @@ async fn shared_pet(
             cases.push(detail);
         }
     }
+    let timeline = crate::vet_share::build_timeline(entries, &cases);
+    let charts = crate::vet_share::charts(&lab_reports);
     render(&SharedPetTemplate {
         grant,
         pet,
-        events,
+        timeline,
+        timeline_limit: SHARE_TIMELINE_LIMIT,
+        charts,
         cases,
+        prescriptions,
     })
 }
 
@@ -4144,8 +4161,11 @@ struct SharesTemplate {
 struct SharedPetTemplate {
     grant: ShareGrant,
     pet: Pet,
-    events: Vec<HealthEvent>,
+    timeline: Vec<crate::vet_share::ShareTimelineItem>,
+    timeline_limit: u64,
+    charts: Vec<crate::vet_share::MarkerChart>,
     cases: Vec<crate::clinical_cases::CaseDetail>,
+    prescriptions: Vec<MedicationPrescription>,
 }
 
 #[derive(Debug)]
