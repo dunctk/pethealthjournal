@@ -1,0 +1,38 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ pet.name }} · Veterinary case brief</title><style>
+body{margin:0;background:#10191b;color:#e8efed;font:16px system-ui,sans-serif;line-height:1.5}
+header,main{max-width:1000px;margin:auto;padding:20px} a{color:#b6dfcc}
+h1{font-size:2rem}h2{font-size:1.25rem}
+article,section.panel{background:#1b292b;border:1px solid #34494a;border-radius:12px;padding:20px;margin:16px 0}
+label{display:block;margin:12px 0} input,select,textarea{box-sizing:border-box;width:100%;padding:10px;background:#f4f6f3;color:#172424;border-radius:6px;border:0;font:inherit}
+button,.button{display:inline-block;padding:10px 16px;background:#c4ead8;border:0;border-radius:6px;color:#172424;font:inherit;cursor:pointer}
+small,.muted{color:#b3c2bb} .tag{font-size:.8rem;border:1px solid #77938c;border-radius:6px;padding:3px 7px}
+.row{display:flex;gap:16px;flex-wrap:wrap;align-items:center;justify-content:space-between}
+details{margin:16px 0} summary{cursor:pointer;font-weight:600}
+pre{white-space:pre-wrap} .notice{border-left:4px solid #d7b66b;padding:12px;background:#29302b}
+@media print {body{color:#000;background:#fff} header,main{max-width:none}article,section.panel{border:1px solid #aaa;background:#fff;break-inside:avoid}a,button,form,details{display:none!important}.muted,small{color:#444}}
+</style></head>
+<body><header><a href="/clinical-cases/{{ detail.investigation.id }}">← Investigation</a><div class="row"><h1>Veterinary case brief: {{ pet.name }}</h1><button type="button" onclick="window.print()">Print / save as PDF</button></div>
+<p>Investigation: {{ detail.investigation.title }} · {{ detail.investigation.status }}</p><p class="notice">Owner-maintained record, not a clinical diagnosis. Dates and veterinary remarks are owner-reported unless confirmed in the clinic's own notes.</p></header>
+<main><section class="panel"><h2>Presenting problem</h2><p>{{ detail.investigation.presenting_concern }}</p><small>Started recording {{ detail.investigation.created_at }} · Updated {{ detail.investigation.updated_at }}</small></section>
+<section class="panel"><h2>Symptoms, treatments, responses, vet discussion and open questions</h2>
+{% if detail.updates.is_empty() %}<p>No case-specific updates recorded.</p>{% endif %}
+{% for entry in detail.updates %}<article><strong>{{ entry.kind }}</strong> · {% match entry.observed_on %}{% when Some with (date) %}{{ date }}{% when None %}Date unknown{% endmatch %}
+<p>{{ entry.original_wording }}</p><small>{% if entry.source == "owner_relayed_vet" %}Owner relaying veterinarian{% else %}Owner-reported{% endif %}{% match entry.linked_event_id %}{% when Some with (id) %} · Linked event #{{ id }}{% when None %}{% endmatch %}</small></article>{% endfor %}</section>
+<section class="panel"><h2>Differential considerations — not diagnoses</h2>
+{% if detail.hypotheses.is_empty() %}<p>None recorded.</p>{% endif %}
+{% for h in detail.hypotheses %}<article><strong>{{ h.label }}</strong> · <span class="tag">{{ h.status }}</span><p>{% match h.rationale %}{% when Some with (r) %}{{ r }}{% when None %}No rationale recorded{% endmatch %}</p>
+<small>{% if h.reported_by == "owner_relayed_vet" %}Owner relaying vet assessment{% else %}Owner question{% endif %}</small></article>{% endfor %}</section>
+<section class="panel"><h2>Medication history (context, not inferred causation)</h2>
+{% if prescriptions.is_empty() %}<p>No prescriptions recorded.</p>{% endif %}
+{% for p in prescriptions %}<article><strong>{{ p.name }}</strong> · {{ p.status }}
+<p>{% match p.started_on %}{% when Some with (day) %}From {{ day }}{% when None %}Start unknown{% endmatch %}
+{% match p.ended_on %}{% when Some with (day) %} to {{ day }}{% when None %}{% endmatch %}
+{% match p.dose_value %}{% when Some with (dose) %} · {{ dose }}{% match p.dose_unit %}{% when Some with (unit) %} {{ unit }}{% when None %}{% endmatch %}{% when None %}{% endmatch %}
+{% match p.frequency %}{% when Some with (freq) %} · {{ freq }}{% when None %}{% endmatch %}</p></article>{% endfor %}</section>
+<section class="panel"><h2>Recent pet health history (up to 40 events, may include unrelated records)</h2>
+{% for event in events %}<article><strong>{{ event.occurred_label }}: {{ event.summary }}</strong><p>{{ event.raw_input }}</p></article>{% endfor %}</section>
+<section class="panel"><h2>Lab reports (if recorded)</h2>
+{% for lab in labs %}<article><strong>{{ lab.source_filename }}</strong>
+{% match lab.test_date %}{% when Some with (date) %} · {{ date }}{% when None %} · Date unavailable{% endmatch %}
+{% for result in lab.results %}<p>{{ result.test_name }}: {{ result.value_text }}{% match result.unit %}{% when Some with (unit) %} {{ unit }}{% when None %}{% endmatch %}</p>{% endfor %}</article>{% endfor %}</section>
+<footer><p>For the veterinarian: verify reported findings and prescription dates against clinical records. No medication change is recommended by this brief.</p></footer></main></body></html>

@@ -10,6 +10,10 @@ The first complete workflow is intentionally direct:
 
 The application also creates expiring, revocable, read-only vet links. Share tokens are stored only as SHA-256 hashes and are displayed to the owner once.
 
+## Clinical investigations
+
+Track unresolved problems across symptoms, treatments, responses, vet findings and open questions without conflating hypotheses with diagnoses. Open Clinical investigations on the pet dashboard or use MCP tools such as open_clinical_case, add_clinical_case_update, add_clinical_hypothesis and get_vet_case_brief. Existing expiring, revocable vet-share pages include case summaries. See [documentation](docs/clinical-investigations.md).
+
 ## Proactive AI and model costs
 
 **Roadmap only:** proactive monitoring is not running today. Future deterministic checks can calculate weight changes, event frequencies and similar measurable patterns without an LLM. Scheduled AI summaries would be optional, bounded and evidence-backed, never a diagnosis or emergency-monitoring guarantee.

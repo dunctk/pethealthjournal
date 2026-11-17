@@ -479,6 +479,84 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
     .await;
     assert_ne!(h.get(path).await.0, StatusCode::OK);
 
+    // An owner can investigate unresolved symptoms without the assistant diagnosing.
+    let case_opened = h
+        .ok(
+            &owner,
+            "open_clinical_case",
+            json!({
+                "pet_id":pet_id,"title":"Persistent upper respiratory signs",
+                "presenting_concern":"Intermittent noisy breathing reported by owner"
+            }),
+        )
+        .await;
+    let case_id = case_opened["case_id"].as_i64().unwrap();
+    let cases = h
+        .ok(&owner, "list_clinical_cases", json!({"pet_id":pet_id}))
+        .await;
+    assert_eq!(cases["investigations"][0]["id"], case_id);
+    h.err(&stranger, "get_clinical_case", json!({"case_id":case_id}))
+        .await;
+    let observation = h
+        .ok(
+            &owner,
+            "add_clinical_case_update",
+            json!({
+                "case_id":case_id,"kind":"observation","original_wording":"Occasional wheezing",
+                "source":"owner_reported"
+            }),
+        )
+        .await;
+    assert!(observation["case_update_id"].as_i64().unwrap() > 0);
+    let hypothesis=h.ok(&owner,"add_clinical_hypothesis",json!({
+        "case_id":case_id,"label":"Could a medication contribute?","reported_by":"owner_question"
+    })).await;
+    let hypothesis_id = hypothesis["hypothesis_id"].as_i64().unwrap();
+    let refused = h
+        .err(
+            &owner,
+            "review_clinical_hypothesis",
+            json!({
+                "case_id":case_id,"hypothesis_id":hypothesis_id,"status":"vet_supported",
+                "rationale":"No vet assessment","reported_by":"owner_question","confirm":true
+            }),
+        )
+        .await;
+    assert!(refused.contains("veterinary assessment"));
+    h.ok(
+        &owner,
+        "review_clinical_hypothesis",
+        json!({
+            "case_id":case_id,"hypothesis_id":hypothesis_id,"status":"under_review",
+            "rationale":"Ask the vet","reported_by":"owner_question","confirm":true
+        }),
+    )
+    .await;
+    let detail = h
+        .ok(&owner, "get_clinical_case", json!({"case_id":case_id}))
+        .await;
+    assert_eq!(
+        detail["updates"][0]["original_wording"],
+        "Occasional wheezing"
+    );
+    let brief = h
+        .ok(&owner, "get_vet_case_brief", json!({"case_id":case_id}))
+        .await;
+    assert_eq!(brief["case"]["investigation"]["id"], case_id);
+    h.ok(
+        &owner,
+        "set_clinical_case_status",
+        json!({
+            "case_id":case_id,"status":"monitoring","confirm":true
+        }),
+    )
+    .await;
+    // No case data should be accessible from an unrelated household.
+    h.err(&stranger, "list_clinical_cases", json!({"pet_id":pet_id}))
+        .await;
+    h.err(&stranger, "get_vet_case_brief", json!({"case_id":case_id}))
+        .await;
+
     // Deleting a pet requires the exact name, then removes everything.
     let refused = h
         .err(

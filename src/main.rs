@@ -3,6 +3,7 @@ mod agent;
 mod analytes;
 mod auth;
 mod billing;
+mod clinical_cases;
 mod config;
 mod db;
 mod domain;
