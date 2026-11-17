@@ -33,6 +33,13 @@ pub fn router(state: AppState) -> Router {
         .route("/app/forms/symptom", get(record_form_symptom))
         .route("/app/forms/lab", get(record_form_lab))
         .route("/app/events/{id}/drawer", get(event_drawer))
+        .route("/clinical-cases", get(crate::clinical_cases::list_page).post(crate::clinical_cases::create_form))
+        .route("/clinical-cases/{id}", get(crate::clinical_cases::detail_page))
+        .route("/clinical-cases/{id}/updates", post(crate::clinical_cases::add_update_form))
+        .route("/clinical-cases/{id}/hypotheses", post(crate::clinical_cases::add_hypothesis_form))
+        .route("/clinical-cases/{id}/hypotheses/{hypothesis_id}/status", post(crate::clinical_cases::hypothesis_status_form))
+        .route("/clinical-cases/{id}/status", post(crate::clinical_cases::case_status_form))
+        .route("/clinical-cases/{id}/brief", get(crate::clinical_cases::brief_page))
         .route("/pets", post(create_pet))
         .route("/pets/{id}/microchip", post(update_pet_microchip))
         .route("/weights", post(create_weight))
@@ -3312,7 +3319,14 @@ async fn shared_pet(
         .await?
         .ok_or_else(AppError::not_found)?;
     let events = db::list_events(&state.db, grant.household_id, Some(pet.id), 100).await?;
-    render(&SharedPetTemplate { grant, pet, events })
+    let listed = crate::clinical_cases::list(&state.db, grant.household_id, pet.id).await?;
+    let mut cases = Vec::new();
+    for investigation in listed {
+        if let Some(detail) = crate::clinical_cases::get(&state.db, grant.household_id, investigation.id).await? {
+            cases.push(detail);
+        }
+    }
+    render(&SharedPetTemplate { grant, pet, events, cases })
 }
 
 async fn css() -> impl IntoResponse {
@@ -4092,6 +4106,7 @@ struct SharedPetTemplate {
     grant: ShareGrant,
     pet: Pet,
     events: Vec<HealthEvent>,
+    cases: Vec<crate::clinical_cases::CaseDetail>,
 }
 
 #[derive(Debug)]
