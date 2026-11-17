@@ -418,6 +418,7 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
         "#,))
     .await?;
     db.execute(stmt(crate::insights::MIGRATION_SQL)).await?;
+    db.execute(stmt(crate::clinical_cases::MIGRATION_SQL)).await?;
     db.execute(stmt(
         r#"
         CREATE TABLE IF NOT EXISTS household_subscriptions (
@@ -1722,7 +1723,11 @@ pub async fn delete_pet(
         .collect::<Result<Vec<_>, _>>()?;
     let mut removed = std::collections::BTreeMap::new();
     // Children before parents so foreign keys hold even with enforcement on.
-    let steps: [(&str, &str); 13] = [
+    let steps: [(&str, &str); 14] = [
+        (
+            "clinical_cases",
+            "DELETE FROM clinical_cases WHERE household_id=? AND pet_id=?",
+        ),
         (
             "pet_passports",
             "DELETE FROM pet_passports WHERE household_id=? AND pet_id=?",
@@ -2560,6 +2565,12 @@ fn symptom_summary(symptom: &str) -> &str {
         "vomiting" => "Vomited",
         "diarrhea" => "Had diarrhea",
         "reduced_appetite" => "Reduced appetite",
+        "wheezing" => "Wheezing",
+        "nasal_discharge" => "Nasal discharge",
+        "eye_discharge" => "Eye discharge",
+        "nasal_congestion" => "Nasal congestion",
+        "coughing" => "Coughing",
+        "labored_breathing" => "Breathing difficulty",
         _ => "Symptom recorded",
     }
 }
