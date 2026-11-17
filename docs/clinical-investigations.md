@@ -33,3 +33,5 @@ Do not invent onset dates, antibiotics or dosage history, veterinary conclusions
 ## Verification
 
 Run cargo fmt --check, cargo check --all-targets, cargo test, and review owner form and vet share at mobile/desktop sizes. MCP e2e exercises isolation and confirmation paths.
+
+The printable case brief intentionally labels recent general health events separately from case-specific entries; they may be unrelated to the presenting problem.
