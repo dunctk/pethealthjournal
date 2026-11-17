@@ -235,6 +235,7 @@ pub struct MarkerChart {
     pub observations: Vec<MarkerObservation>,
     pub chart_points: Vec<MarkerObservation>,
     pub line: String,
+    pub show_line: bool,
     pub min_label: String,
     pub max_label: String,
     pub start_label: String,
@@ -281,6 +282,7 @@ pub fn charts(reports: &[LabReport]) -> Vec<MarkerChart> {
                     observations: Vec::new(),
                     chart_points: Vec::new(),
                     line: String::new(),
+                    show_line: false,
                     min_label: String::new(),
                     max_label: String::new(),
                     start_label: String::new(),
@@ -310,11 +312,11 @@ pub fn charts(reports: &[LabReport]) -> Vec<MarkerChart> {
         maximum += padding;
         let span = (maximum - minimum).max(0.001);
         let days = (latest - earliest).num_days();
-        let plotted_count = plotted.len();
-        for (i, point) in plotted.iter_mut().enumerate() {
+        chart.show_line = days > 0 && plotted.len() > 1;
+        for point in &mut plotted {
             let date = parse_test_date(&point.test_date).expect("filtered valid date");
             point.x = if days == 0 {
-                if plotted_count == 1 { 300.0 } else { 44.0 + i as f64 * 512.0 / (plotted_count - 1) as f64 }
+                300.0
             } else {
                 44.0 + 512.0 * (date - earliest).num_days() as f64 / days as f64
             };
