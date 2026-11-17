@@ -22,8 +22,8 @@ mod ocr;
 mod passports;
 mod photos;
 mod storage;
-mod web;
 mod vet_share;
+mod web;
 
 use anyhow::Context;
 use config::Config;

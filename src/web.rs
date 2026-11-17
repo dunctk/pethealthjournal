@@ -3353,7 +3353,14 @@ async fn shared_pet(
     // All private tables are read only after token resolution; this same GET
     // is checked again on every access, so expiry and revocation apply to all details.
     const SHARE_TIMELINE_LIMIT: u64 = 400;
-    let entries = db::list_timeline(&state.db, grant.household_id, pet.id, None, SHARE_TIMELINE_LIMIT).await?;
+    let entries = db::list_timeline(
+        &state.db,
+        grant.household_id,
+        pet.id,
+        None,
+        SHARE_TIMELINE_LIMIT,
+    )
+    .await?;
     let lab_reports = db::list_lab_reports(&state.db, grant.household_id, pet.id).await?;
     let prescriptions = db::list_prescriptions(&state.db, grant.household_id, pet.id, 80).await?;
     let listed = crate::clinical_cases::list(&state.db, grant.household_id, pet.id).await?;

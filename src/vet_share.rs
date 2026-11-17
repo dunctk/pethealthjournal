@@ -103,11 +103,19 @@ pub fn build_timeline(entries: Vec<TimelineEntry>, cases: &[CaseDetail]) -> Vec<
             }
             TimelineEntry::Dose(dose) => {
                 let mut facts = Vec::new();
-                optional(&mut facts, "Active ingredient", dose.active_ingredient.as_deref());
+                optional(
+                    &mut facts,
+                    "Active ingredient",
+                    dose.active_ingredient.as_deref(),
+                );
                 if let Some(value) = dose.dose_value {
                     facts.push(fact(
                         "Dose",
-                        format!("{} {}", value, dose.dose_unit.as_deref().unwrap_or("unit not recorded")),
+                        format!(
+                            "{} {}",
+                            value,
+                            dose.dose_unit.as_deref().unwrap_or("unit not recorded")
+                        ),
                     ));
                 }
                 optional(&mut facts, "Route", dose.route.as_deref());
@@ -268,10 +276,15 @@ pub fn charts(reports: &[LabReport]) -> Vec<MarkerChart> {
                 printed_name: result.test_name.clone(),
                 printed_value: result.value_text.clone(),
                 printed_unit: result.unit.clone().unwrap_or_else(|| "not stated".into()),
-                reference_range: result.reference_range.clone().unwrap_or_else(|| "not provided".into()),
+                reference_range: result
+                    .reference_range
+                    .clone()
+                    .unwrap_or_else(|| "not provided".into()),
                 flag: result.flag.clone().unwrap_or_else(|| "not marked".into()),
                 plot_value: standard.value.filter(|value| value.is_finite()),
-                x: 0.0, y: 0.0, tooltip: String::new(),
+                x: 0.0,
+                y: 0.0,
+                tooltip: String::new(),
             };
             groups
                 .entry(key.clone())
@@ -295,19 +308,30 @@ pub fn charts(reports: &[LabReport]) -> Vec<MarkerChart> {
     let mut charts: Vec<MarkerChart> = groups.into_values().collect();
     charts.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.unit.cmp(&b.unit)));
     for chart in &mut charts {
-        chart.observations.sort_by(|a, b| a.test_date.cmp(&b.test_date));
+        chart
+            .observations
+            .sort_by(|a, b| a.test_date.cmp(&b.test_date));
         let mut plotted: Vec<MarkerObservation> = chart
-            .observations.iter().filter(|v| v.test_date_known && v.plot_value.is_some()).cloned().collect();
+            .observations
+            .iter()
+            .filter(|v| v.test_date_known && v.plot_value.is_some())
+            .cloned()
+            .collect();
         if plotted.is_empty() {
             continue;
         }
-        let dates: Vec<NaiveDate> = plotted.iter().filter_map(|r| parse_test_date(&r.test_date)).collect();
+        let dates: Vec<NaiveDate> = plotted
+            .iter()
+            .filter_map(|r| parse_test_date(&r.test_date))
+            .collect();
         let earliest = *dates.iter().min().expect("has plotted dates");
         let latest = *dates.iter().max().expect("has plotted dates");
         let values: Vec<f64> = plotted.iter().filter_map(|r| r.plot_value).collect();
         let mut minimum = values.iter().copied().fold(f64::INFINITY, f64::min);
         let mut maximum = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let padding = ((maximum - minimum).abs() * 0.12).max(maximum.abs() * 0.05).max(0.01);
+        let padding = ((maximum - minimum).abs() * 0.12)
+            .max(maximum.abs() * 0.05)
+            .max(0.01);
         minimum -= padding;
         maximum += padding;
         let span = (maximum - minimum).max(0.001);
@@ -320,14 +344,23 @@ pub fn charts(reports: &[LabReport]) -> Vec<MarkerChart> {
             } else {
                 44.0 + 512.0 * (date - earliest).num_days() as f64 / days as f64
             };
-            point.y = 170.0 - 135.0 * (point.plot_value.expect("filtered numeric") - minimum) / span;
+            point.y =
+                170.0 - 135.0 * (point.plot_value.expect("filtered numeric") - minimum) / span;
             point.tooltip = format!(
                 "{}: {} {} (report #{}, reference {}, flag {})",
-                point.test_date, point.printed_value, point.printed_unit, point.report_id,
-                point.reference_range, point.flag
+                point.test_date,
+                point.printed_value,
+                point.printed_unit,
+                point.report_id,
+                point.reference_range,
+                point.flag
             );
         }
-        chart.line = plotted.iter().map(|v| format!("{:.1},{:.1}",v.x,v.y)).collect::<Vec<_>>().join(" ");
+        chart.line = plotted
+            .iter()
+            .map(|v| format!("{:.1},{:.1}", v.x, v.y))
+            .collect::<Vec<_>>()
+            .join(" ");
         chart.start_label = earliest.format("%d %b %Y").to_string();
         chart.end_label = latest.format("%d %b %Y").to_string();
         chart.min_label = format!("{minimum:.2}");
@@ -340,48 +373,66 @@ pub fn charts(reports: &[LabReport]) -> Vec<MarkerChart> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{LabResult, LabReport};
-    fn report(id: i64, date: Option<&str>, name: &str, value: Option<f64>, unit: &str) -> LabReport {
+    use crate::domain::{LabReport, LabResult};
+    fn report(
+        id: i64,
+        date: Option<&str>,
+        name: &str,
+        value: Option<f64>,
+        unit: &str,
+    ) -> LabReport {
         LabReport {
-            id, pet_id: 1, pet_name: "Example".into(), source_filename: "report.pdf".into(),
-            raw_text: String::new(), test_date: date.map(str::to_owned),
-            imported_at: Utc::now(), parse_status: "confirmed".into(), has_original: false,
+            id,
+            pet_id: 1,
+            pet_name: "Example".into(),
+            source_filename: "report.pdf".into(),
+            raw_text: String::new(),
+            test_date: date.map(str::to_owned),
+            imported_at: Utc::now(),
+            parse_status: "confirmed".into(),
+            has_original: false,
             results: vec![LabResult {
-                id, test_name: name.into(), value_text: value.map(|v|v.to_string()).unwrap_or_else(|| "<0.5".into()),
-                value_numeric: value, unit: Some(unit.into()), reference_range: Some("0.8–2.4".into()),
+                id,
+                test_name: name.into(),
+                value_text: value
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "<0.5".into()),
+                value_numeric: value,
+                unit: Some(unit.into()),
+                reference_range: Some("0.8–2.4".into()),
                 flag: None,
             }],
         }
     }
     #[test]
     fn known_units_convert_before_charting_and_keep_original_values() {
-        let data=charts(&[
-            report(1, Some("2026-01-02"),"CREA",Some(1.8),"mg/dL"),
-            report(2, Some("2026-02-02"),"Creatinina",Some(159.2),"µmol/L"),
+        let data = charts(&[
+            report(1, Some("2026-01-02"), "CREA", Some(1.8), "mg/dL"),
+            report(2, Some("2026-02-02"), "Creatinina", Some(159.2), "µmol/L"),
         ]);
-        assert_eq!(data.len(),1);
-        assert_eq!(data[0].unit,"µmol/L");
-        assert_eq!(data[0].chart_points.len(),2);
-        assert_eq!(data[0].chart_points[0].plot_value,Some(159.2));
-        assert_eq!(data[0].observations[0].printed_value,"1.8");
-        assert_eq!(data[0].observations[0].printed_unit,"mg/dL");
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].unit, "µmol/L");
+        assert_eq!(data[0].chart_points.len(), 2);
+        assert_eq!(data[0].chart_points[0].plot_value, Some(159.2));
+        assert_eq!(data[0].observations[0].printed_value, "1.8");
+        assert_eq!(data[0].observations[0].printed_unit, "mg/dL");
     }
     #[test]
     fn unknown_dates_and_non_numeric_results_remain_visible_but_not_plotted() {
-        let data=charts(&[
-            report(1,None,"SDMA",Some(18.0),"µg/dL"),
-            report(2,Some("2026-01-04"),"SDMA",None,"µg/dL"),
+        let data = charts(&[
+            report(1, None, "SDMA", Some(18.0), "µg/dL"),
+            report(2, Some("2026-01-04"), "SDMA", None, "µg/dL"),
         ]);
-        assert_eq!(data.len(),1);
-        assert_eq!(data[0].observations.len(),2);
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].observations.len(), 2);
         assert!(data[0].chart_points.is_empty());
     }
     #[test]
     fn incomparable_units_stay_separate() {
-        let data=charts(&[
-            report(1,Some("2026-01-02"),"CREA",Some(2.0),"mg/dL"),
-            report(2,Some("2026-01-03"),"CREA",Some(0.13),"mmol/L"),
+        let data = charts(&[
+            report(1, Some("2026-01-02"), "CREA", Some(2.0), "mg/dL"),
+            report(2, Some("2026-01-03"), "CREA", Some(0.13), "mmol/L"),
         ]);
-        assert_eq!(data.len(),2);
+        assert_eq!(data.len(), 2);
     }
 }
