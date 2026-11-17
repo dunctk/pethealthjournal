@@ -180,11 +180,6 @@ pub fn build_timeline(entries: Vec<TimelineEntry>, cases: &[CaseDetail]) -> Vec<
                 .and_then(|date| date.and_hms_opt(12, 0, 0).map(|v| v.and_utc()))
                 .unwrap_or(recorded);
             let mut facts = vec![fact("Investigation", &case.investigation.title)];
-            optional(
-                &mut facts,
-                "Linked health event ID",
-                update.linked_event_id.map(|_| "").as_deref(),
-            );
             if let Some(event_id) = update.linked_event_id {
                 facts.push(fact("Linked record", format!("Health event #{event_id}")));
             }
@@ -315,10 +310,11 @@ pub fn charts(reports: &[LabReport]) -> Vec<MarkerChart> {
         maximum += padding;
         let span = (maximum - minimum).max(0.001);
         let days = (latest - earliest).num_days();
+        let plotted_count = plotted.len();
         for (i, point) in plotted.iter_mut().enumerate() {
             let date = parse_test_date(&point.test_date).expect("filtered valid date");
             point.x = if days == 0 {
-                if plotted.len() == 1 { 300.0 } else { 44.0 + i as f64 * 512.0 / (plotted.len() - 1) as f64 }
+                if plotted_count == 1 { 300.0 } else { 44.0 + i as f64 * 512.0 / (plotted_count - 1) as f64 }
             } else {
                 44.0 + 512.0 * (date - earliest).num_days() as f64 / days as f64
             };
