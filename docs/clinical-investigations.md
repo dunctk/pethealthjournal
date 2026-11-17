@@ -49,3 +49,5 @@ The existing short-lived /share/{token} link now presents:
 **Privacy boundary:** The existing share-token resolver runs on every request, so revoked and expired links deny all sections. The route is read-only and uses no new public data endpoints, external charting scripts, image uploads, or model calls. The page doesn't expose private passport images, microchip IDs, account details, or original lab-file download URLs. Existing no-store, no-referrer and strict CSP headers apply.
 
 Render validation: compare at desktop and mobile widths, expand each clinical row and marker, inspect graph point details and tables, and confirm revoked links return not found. The server-side charts are informational only; the veterinarian should confirm clinical interpretation from the source report.
+
+Chart points have tooltips for pointer users, and every underlying measurement is available in the table for keyboard and assistive-technology users. Lab-report links target the expandable timeline report details.
