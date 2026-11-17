@@ -1,7 +1,7 @@
 <form method="post" action="/symptoms" class="structured-form dialog-form" data-dialog-form hx-post="/symptoms" hx-target="#record-form-status" hx-swap="innerHTML">
   <input type="hidden" name="pet_id" value="{{ pet.id }}">
-  <label>Symptom<select name="symptom"><option value="vomiting">Vomiting</option><option value="diarrhea">Diarrhea</option><option value="reduced_appetite">Reduced appetite</option></select></label>
-  <label>Original wording<input required maxlength="1000" name="raw_input" value="{{ pet.name }} vomited just now"></label>
+  <label>Symptom<select name="symptom"><option value="vomiting">Vomiting</option><option value="diarrhea">Diarrhea</option><option value="reduced_appetite">Reduced appetite</option><option value="wheezing">Wheezing</option><option value="nasal_congestion">Blocked / congested nose</option><option value="nasal_discharge">Runny nose</option><option value="eye_discharge">Runny eye</option><option value="coughing">Coughing</option><option value="labored_breathing">Breathing difficulty</option></select></label>
+  <label>Original wording<input required maxlength="1000" name="raw_input" placeholder="Describe exactly what you saw, without guessing the cause"></label>
   <label>Count<input type="number" min="1" max="100" name="occurrence_count" placeholder="1"></label>
   <label>Amount<select name="amount"><option value="">Not sure</option><option>small</option><option>medium</option><option>large</option></select></label>
   <label>Contents<select name="contents"><option value="">Not sure</option><option>food</option><option>foam</option><option>bile</option><option>hair</option><option>blood</option><option>foreign material</option></select></label>
