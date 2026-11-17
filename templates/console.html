@@ -69,6 +69,7 @@
           <div id="record-dialog-slot" class="record-dialog-slot"></div>
         </dialog>
       </section>
+      <p><a class="button secondary" href="/clinical-cases?pet_id={{ pet.id }}">Clinical investigations / vet case briefs</a></p>
       <details class="pet-microchip">
         <summary>Microchip: {% match pet.microchip_number %}{% when Some with (number) %}<strong>{{ number }}</strong>{% when None %}<span>Not recorded</span>{% endmatch %} <span class="pet-microchip-action">Edit</span></summary>
         <form method="post" action="/pets/{{ pet.id }}/microchip" class="stack-form">
