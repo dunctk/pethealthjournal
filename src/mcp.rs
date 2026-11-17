@@ -1,5 +1,5 @@
 use crate::{
-    AppState, db,
+    AppState, clinical_cases, db,
     domain::{ProposedEvent, UserAccount},
 };
 use axum::{
@@ -786,6 +786,14 @@ fn tool_list() -> Value {
         {"name":"add_pet_passport","description":"Save one passport PDF or photographed page. Use passport_file for a ChatGPT attachment OR content_base64 for API clients with raw bytes; never both. Confirm the correct pet before saving.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"label":{"type":"string","maxLength":100},"filename":{"type":"string","maxLength":120},"passport_file":{"type":"object","properties":{"download_url":{"type":"string"},"file_id":{"type":"string"}}},"content_base64":{"type":"string","description":"Base64-encoded PDF/JPEG/PNG/WebP bytes (API clients only)."}},"required":["pet_id"]},"_meta":{"openai/fileParams":["passport_file"]}},
         {"name":"delete_pet_passport","description":"Permanently remove a stored passport scan and its file, only after explicit approval and confirm:true.","inputSchema":{"type":"object","properties":{"passport_id":{"type":"integer"},"confirm":{"type":"boolean"}},"required":["passport_id","confirm"]},"annotations":{"destructiveHint":true}},
         {"name":"get_pet_timeline","description":"Read active health events for one pet, newest first. The owner's original wording is preserved in raw_input. Prefer narrow date ranges and small limits over bulk history.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":100,"default":25},"offset":{"type":"integer","minimum":0,"default":0},"since":{"type":"string","description":"Earliest date to include, YYYY-MM-DD."},"until":{"type":"string","description":"Latest date to include, YYYY-MM-DD."},"category":{"type":"string","enum":["symptom","observation","medication","measurement","vet_visit"],"description":"Filter by event type."}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
+        {"name":"list_clinical_cases","description":"List persistent clinical investigations for one pet. These organize unresolved problems, not diagnoses.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
+        {"name":"get_clinical_case","description":"Read the owner's dated notes, vet-reported findings, treatment responses, uncertainties and differential questions in one investigation. Vet attribution is owner-relayed unless directly verified.","inputSchema":{"type":"object","properties":{"case_id":{"type":"integer"}},"required":["case_id"]},"annotations":{"readOnlyHint":true}},
+        {"name":"open_clinical_case","description":"Start an unresolved clinical investigation for a pet using the owner's original presenting concern. Do not supply an AI diagnosis.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"title":{"type":"string","maxLength":120},"presenting_concern":{"type":"string","maxLength":2000}},"required":["pet_id","title","presenting_concern"]}},
+        {"name":"add_clinical_case_update","description":"Append a dated owner observation, medication course, response, vet-reported finding, test or question. Use exact wording, never invent dates or claim independent vet authentication. Optionally link an existing active health event from the same pet.","inputSchema":{"type":"object","properties":{"case_id":{"type":"integer"},"kind":{"type":"string","enum":["observation","treatment","response","vet_finding","test","question"]},"original_wording":{"type":"string","maxLength":3000},"observed_on":{"type":"string","description":"Known observation date YYYY-MM-DD. Omit rather than guessing."},"source":{"type":"string","enum":["owner_reported","owner_relayed_vet"],"default":"owner_reported"},"linked_event_id":{"type":"integer"}},"required":["case_id","kind","original_wording"]}},
+        {"name":"add_clinical_hypothesis","description":"Store an explicitly UNREVIEWED possible explanation or question for the veterinarian. Do not present it as a diagnosis. reported_by says where the idea came from.","inputSchema":{"type":"object","properties":{"case_id":{"type":"integer"},"label":{"type":"string","maxLength":200},"rationale":{"type":"string","maxLength":2000},"reported_by":{"type":"string","enum":["owner_question","owner_relayed_vet"],"default":"owner_question"}},"required":["case_id","label"]}},
+        {"name":"review_clinical_hypothesis","description":"Update hypothesis review status only with owner's explicit approval. 'ruled_out' or 'vet_supported' require the owner to relay a specific veterinary assessment; this is NOT independently verified.","inputSchema":{"type":"object","properties":{"case_id":{"type":"integer"},"hypothesis_id":{"type":"integer"},"status":{"type":"string","enum":["unreviewed","under_review","less_likely","ruled_out","vet_supported"]},"rationale":{"type":"string","maxLength":2000},"reported_by":{"type":"string","enum":["owner_question","owner_relayed_vet"]},"confirm":{"type":"boolean"}},"required":["case_id","hypothesis_id","status","rationale","reported_by","confirm"]},"annotations":{"destructiveHint":true}},
+        {"name":"set_clinical_case_status","description":"Mark a clinical investigation open, monitoring or resolved, only with owner's explicit approval. Do not equate 'resolved' with a diagnosis.","inputSchema":{"type":"object","properties":{"case_id":{"type":"integer"},"status":{"type":"string","enum":["open","monitoring","resolved"]},"confirm":{"type":"boolean"}},"required":["case_id","status","confirm"]},"annotations":{"destructiveHint":true}},
+        {"name":"get_vet_case_brief","description":"Get a structured owner-reported investigation brief with prescription context, recent events and lab reports, clearly separated from possible explanations. The owner can print the same brief in the web app.","inputSchema":{"type":"object","properties":{"case_id":{"type":"integer"}},"required":["case_id"]},"annotations":{"readOnlyHint":true}},
         {"name":"get_clinical_timeline","description":"Read a pet's symptoms, medications, and neutral time links between them. This is context for a vet, not a diagnosis.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
         {"name":"get_medication_plan","description":"Read a pet's current prescriptions and dose-adherence history. This is a record, not a dosing recommendation.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
         {"name":"get_health_context","description":"Read practical care context for a health concept. This is not a diagnosis.","inputSchema":{"type":"object","properties":{"concept":{"type":"string"}},"required":["concept"]},"annotations":{"readOnlyHint":true}},
@@ -794,7 +802,7 @@ fn tool_list() -> Value {
         {"name":"get_health_insights","description":"Read deterministic, LLM-free health findings for one pet (weight trends, symptom frequency, adherence gaps, lab deltas), newest first. Each finding cites its source records. These describe measured changes only, never a diagnosis.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":25},"include_dismissed":{"type":"boolean","default":false}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
         {"name":"add_pet","description":"Add a pet to the signed-in household.","inputSchema":{"type":"object","properties":{"name":{"type":"string"},"species":{"type":"string"},"breed":{"type":"string"},"weight_kg":{"type":"number"}},"required":["name","species"]}},
         {"name":"record_weight","description":"Save a weight measurement for a pet.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"weight_kg":{"type":"number"},"measured_at":{"type":"string","description":"YYYY-MM-DD"},"note":{"type":"string"}},"required":["pet_id","weight_kg","measured_at"]}},
-        {"name":"record_symptom_event","description":"Record a structured symptom using the user's original wording. The server timestamps it now or by relative minutes_ago; absolute timestamps are not accepted from the model.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"message":{"type":"string"},"symptom":{"type":"string","enum":["vomiting","diarrhea","reduced_appetite"]},"minutes_ago":{"type":"integer","minimum":0,"maximum":525600},"occurrence_count":{"type":"integer","minimum":1,"maximum":100},"amount":{"type":"string"},"contents":{"type":"string"},"meal_relation":{"type":"string"},"water_status":{"type":"string"},"appetite_status":{"type":"string"},"energy_status":{"type":"string"},"pain_status":{"type":"string"},"note":{"type":"string"}},"required":["pet_id","message","symptom"]}},
+        {"name":"record_symptom_event","description":"Record a structured symptom using the user's original wording. The server timestamps it now or by relative minutes_ago; absolute timestamps are not accepted from the model.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"message":{"type":"string"},"symptom":{"type":"string","enum":["vomiting","diarrhea","reduced_appetite","wheezing","nasal_discharge","nasal_congestion","eye_discharge","coughing","labored_breathing"]},"minutes_ago":{"type":"integer","minimum":0,"maximum":525600},"occurrence_count":{"type":"integer","minimum":1,"maximum":100},"amount":{"type":"string"},"contents":{"type":"string"},"meal_relation":{"type":"string"},"water_status":{"type":"string"},"appetite_status":{"type":"string"},"energy_status":{"type":"string"},"pain_status":{"type":"string"},"note":{"type":"string"}},"required":["pet_id","message","symptom"]}},
         {"name":"record_medication","description":"Record a medication exposure. The server timestamps administration now or by relative minutes_ago; include the exact product, active ingredient, strength, dose, route, and whether it was given, missed, extra, or vomited back.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"name":{"type":"string"},"active_ingredient":{"type":"string"},"dose_value":{"type":"number"},"dose_unit":{"type":"string"},"route":{"type":"string"},"minutes_ago":{"type":"integer","minimum":0,"maximum":525600},"status":{"type":"string","enum":["given","missed","extra","vomited_back"]},"message":{"type":"string"}},"required":["pet_id","name"]}},
         {"name":"record_prescription","description":"Save a pet's prescription plan (strength, dose, frequency, instructions). The owner's wording is preserved. CONFIRMATION: if the pet already has an ACTIVE prescription with the same name and different dosing, the call is rejected unless confirm:true is passed after the owner explicitly approves the change.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"name":{"type":"string"},"active_ingredient":{"type":"string"},"concentration_value":{"type":"number"},"concentration_unit":{"type":"string"},"dose_value":{"type":"number"},"dose_unit":{"type":"string"},"frequency":{"type":"string"},"route":{"type":"string"},"instructions":{"type":"string"},"started_days_ago":{"type":"integer","minimum":0,"maximum":36500},"status":{"type":"string","enum":["active","paused","stopped"]},"message":{"type":"string"},"confirm":{"type":"boolean","description":"Set true only after the owner explicitly confirms replacing a differing active prescription.","default":false}},"required":["pet_id","name"]},"annotations":{"destructiveHint":true}},
         {"name":"update_prescription","description":"Change an EXISTING prescription: stop it, pause it, resume a paused one, or change its dose/frequency. Use this instead of record_prescription when the owner says the vet stopped, paused, or adjusted a medication. Get prescription_id from get_medication_plan. History is kept: a dose change stops the old regimen and creates a new active one. Restate the change to the owner and get their explicit approval before calling with confirm:true.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"prescription_id":{"type":"integer"},"action":{"type":"string","enum":["stop","pause","resume","change_dose"]},"effective_days_ago":{"type":"integer","minimum":0,"maximum":3650,"default":0,"description":"For stop/change_dose: how many days ago it took effect. The server computes the date."},"dose_value":{"type":"number","exclusiveMinimum":0},"dose_unit":{"type":"string","maxLength":40},"frequency":{"type":"string","maxLength":120},"concentration_value":{"type":"number","exclusiveMinimum":0},"concentration_unit":{"type":"string","maxLength":40},"instructions":{"type":"string","maxLength":1000},"message":{"type":"string","minLength":1,"maxLength":1000,"description":"The owner's exact words; preserved on the timeline."},"confirm":{"type":"boolean","description":"Must be true, only after the owner explicitly approved this change."}},"required":["pet_id","prescription_id","action","message","confirm"]},"annotations":{"destructiveHint":true}},
@@ -1014,6 +1022,72 @@ async fn call_tool(
                 .take(limit as usize)
                 .collect();
             serde_json::to_value(events).map_err(internal)?
+        }
+        "list_clinical_cases" => {
+            let pet_id=integer(&args,"pet_id")?;
+            db::get_pet(&state.db,user.household_id,pet_id).await.map_err(internal)?
+                .ok_or((-32602,"Pet not in this household.".into()))?;
+            json!({"investigations":clinical_cases::list(&state.db,user.household_id,pet_id).await.map_err(internal)?})
+        }
+        "get_clinical_case" => {
+            let id=integer(&args,"case_id")?;
+            serde_json::to_value(clinical_cases::get(&state.db,user.household_id,id).await.map_err(internal)?
+                .ok_or((-32602,"Investigation not found.".into()))?).map_err(internal)?
+        }
+        "open_clinical_case" => {
+            let id=clinical_cases::create(&state.db,user.household_id,integer(&args,"pet_id")?,&user.audit_actor(),
+                &string(&args,"title")?,&string(&args,"presenting_concern")?).await
+                .map_err(|e|(-32602,e.to_string()))?;
+            json!({"case_id":id,"message":"Investigation opened. This is not a diagnosis."})
+        }
+        "add_clinical_case_update" => {
+            let id=clinical_cases::add_update(&state.db,user.household_id,integer(&args,"case_id")?,&user.audit_actor(),
+                &string(&args,"kind")?,&string(&args,"original_wording")?,
+                string_opt(&args,"observed_on"),args.get("source").and_then(Value::as_str).unwrap_or("owner_reported"),
+                args.get("linked_event_id").and_then(Value::as_i64)).await
+                .map_err(|e|(-32602,e.to_string()))?;
+            json!({"case_update_id":id,"message":"Case evidence added without interpreting its cause."})
+        }
+        "add_clinical_hypothesis" => {
+            let id=clinical_cases::add_hypothesis(&state.db,user.household_id,integer(&args,"case_id")?,&user.audit_actor(),
+                &string(&args,"label")?,string_opt(&args,"rationale"),
+                args.get("reported_by").and_then(Value::as_str).unwrap_or("owner_question")).await
+                .map_err(|e|(-32602,e.to_string()))?;
+            json!({"hypothesis_id":id,"status":"unreviewed","message":"Question recorded for veterinary review, not diagnosed."})
+        }
+        "review_clinical_hypothesis" => {
+            if args.get("confirm").and_then(Value::as_bool)!=Some(true) {
+                return Err((-32602,"Explicit owner approval (confirm:true) is required.".into()));
+            }
+            let changed=clinical_cases::set_hypothesis_status(&state.db,user.household_id,integer(&args,"case_id")?,
+                integer(&args,"hypothesis_id")?,&user.audit_actor(),&string(&args,"status")?,
+                &string(&args,"rationale")?,&string(&args,"reported_by")?).await
+                .map_err(|e|(-32602,e.to_string()))?;
+            if !changed { return Err((-32602,"Hypothesis not found.".into())); }
+            json!({"updated":true,"note":"Vet assessment, if present, is owner-relayed and not independently verified."})
+        }
+        "set_clinical_case_status" => {
+            if args.get("confirm").and_then(Value::as_bool)!=Some(true) {
+                return Err((-32602,"Explicit owner approval (confirm:true) is required.".into()));
+            }
+            let changed=clinical_cases::set_status(&state.db,user.household_id,integer(&args,"case_id")?,
+                &user.audit_actor(),&string(&args,"status")?).await
+                .map_err(|e|(-32602,e.to_string()))?;
+            if !changed { return Err((-32602,"Investigation not found.".into())); }
+            json!({"updated":true})
+        }
+        "get_vet_case_brief" => {
+            let id=integer(&args,"case_id")?;
+            let detail=clinical_cases::get(&state.db,user.household_id,id).await.map_err(internal)?
+                .ok_or((-32602,"Investigation not found.".into()))?;
+            let pet_id=detail.investigation.pet_id;
+            json!({
+                "case":detail,
+                "prescriptions":db::list_prescriptions(&state.db,user.household_id,pet_id,30).await.map_err(internal)?,
+                "recent_events_may_be_unrelated":db::list_events(&state.db,user.household_id,Some(pet_id),40).await.map_err(internal)?,
+                "labs":db::list_lab_reports(&state.db,user.household_id,pet_id).await.map_err(internal)?,
+                "disclaimer":"Owner-maintained record. Possible explanations are unconfirmed; veterinary assessments are owner-relayed. No dosing recommendations."
+            })
         }
         "get_clinical_timeline" => {
             let pet_id = integer(&args, "pet_id")?;
@@ -1255,7 +1329,7 @@ async fn call_tool(
                 .get("symptom")
                 .and_then(Value::as_str)
                 .unwrap_or("vomiting");
-            if !matches!(symptom, "vomiting" | "diarrhea" | "reduced_appetite") {
+            if !matches!(symptom, "vomiting" | "diarrhea" | "reduced_appetite" | "wheezing" | "nasal_discharge" | "nasal_congestion" | "eye_discharge" | "coughing" | "labored_breathing") {
                 return Err((-32602, "symptom is not supported.".into()));
             }
             let minutes_ago = args
