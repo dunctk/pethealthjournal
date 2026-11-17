@@ -126,7 +126,7 @@
           <line x1="44" y1="102" x2="556" y2="102" stroke="currentColor" opacity=".14" stroke-dasharray="4 5"/>
           <text x="40" y="36" text-anchor="end" fill="currentColor" font-size="12">{{ chart.max_label }}</text>
           <text x="40" y="173" text-anchor="end" fill="currentColor" font-size="12">{{ chart.min_label }}</text>
-          {% if chart.chart_points.len() > 1 %}<polyline points="{{ chart.line }}" fill="none" stroke="#7cc8b0" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>{% endif %}
+          {% if chart.show_line %}<polyline points="{{ chart.line }}" fill="none" stroke="#7cc8b0" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>{% endif %}
           {% for point in chart.chart_points %}
           <circle cx="{{ point.x }}" cy="{{ point.y }}" r="6" fill="#8ae4bf" stroke="#162f28" stroke-width="2">
             <title>{{ point.tooltip }}</title>
