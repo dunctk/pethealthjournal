@@ -418,7 +418,8 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
         "#,))
     .await?;
     db.execute(stmt(crate::insights::MIGRATION_SQL)).await?;
-    db.execute(stmt(crate::clinical_cases::MIGRATION_SQL)).await?;
+    db.execute(stmt(crate::clinical_cases::MIGRATION_SQL))
+        .await?;
     db.execute(stmt(
         r#"
         CREATE TABLE IF NOT EXISTS household_subscriptions (

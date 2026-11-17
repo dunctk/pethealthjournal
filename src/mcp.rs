@@ -1024,63 +1024,122 @@ async fn call_tool(
             serde_json::to_value(events).map_err(internal)?
         }
         "list_clinical_cases" => {
-            let pet_id=integer(&args,"pet_id")?;
-            db::get_pet(&state.db,user.household_id,pet_id).await.map_err(internal)?
-                .ok_or((-32602,"Pet not in this household.".into()))?;
+            let pet_id = integer(&args, "pet_id")?;
+            db::get_pet(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?
+                .ok_or((-32602, "Pet not in this household.".into()))?;
             json!({"investigations":clinical_cases::list(&state.db,user.household_id,pet_id).await.map_err(internal)?})
         }
         "get_clinical_case" => {
-            let id=integer(&args,"case_id")?;
-            serde_json::to_value(clinical_cases::get(&state.db,user.household_id,id).await.map_err(internal)?
-                .ok_or((-32602,"Investigation not found.".into()))?).map_err(internal)?
+            let id = integer(&args, "case_id")?;
+            serde_json::to_value(
+                clinical_cases::get(&state.db, user.household_id, id)
+                    .await
+                    .map_err(internal)?
+                    .ok_or((-32602, "Investigation not found.".into()))?,
+            )
+            .map_err(internal)?
         }
         "open_clinical_case" => {
-            let id=clinical_cases::create(&state.db,user.household_id,integer(&args,"pet_id")?,&user.audit_actor(),
-                &string(&args,"title")?,&string(&args,"presenting_concern")?).await
-                .map_err(|e|(-32602,e.to_string()))?;
+            let id = clinical_cases::create(
+                &state.db,
+                user.household_id,
+                integer(&args, "pet_id")?,
+                &user.audit_actor(),
+                &string(&args, "title")?,
+                &string(&args, "presenting_concern")?,
+            )
+            .await
+            .map_err(|e| (-32602, e.to_string()))?;
             json!({"case_id":id,"message":"Investigation opened. This is not a diagnosis."})
         }
         "add_clinical_case_update" => {
-            let id=clinical_cases::add_update(&state.db,user.household_id,integer(&args,"case_id")?,&user.audit_actor(),
-                &string(&args,"kind")?,&string(&args,"original_wording")?,
-                string_opt(&args,"observed_on"),args.get("source").and_then(Value::as_str).unwrap_or("owner_reported"),
-                args.get("linked_event_id").and_then(Value::as_i64)).await
-                .map_err(|e|(-32602,e.to_string()))?;
+            let id = clinical_cases::add_update(
+                &state.db,
+                user.household_id,
+                integer(&args, "case_id")?,
+                &user.audit_actor(),
+                &string(&args, "kind")?,
+                &string(&args, "original_wording")?,
+                string_opt(&args, "observed_on"),
+                args.get("source")
+                    .and_then(Value::as_str)
+                    .unwrap_or("owner_reported"),
+                args.get("linked_event_id").and_then(Value::as_i64),
+            )
+            .await
+            .map_err(|e| (-32602, e.to_string()))?;
             json!({"case_update_id":id,"message":"Case evidence added without interpreting its cause."})
         }
         "add_clinical_hypothesis" => {
-            let id=clinical_cases::add_hypothesis(&state.db,user.household_id,integer(&args,"case_id")?,&user.audit_actor(),
-                &string(&args,"label")?,string_opt(&args,"rationale"),
-                args.get("reported_by").and_then(Value::as_str).unwrap_or("owner_question")).await
-                .map_err(|e|(-32602,e.to_string()))?;
+            let id = clinical_cases::add_hypothesis(
+                &state.db,
+                user.household_id,
+                integer(&args, "case_id")?,
+                &user.audit_actor(),
+                &string(&args, "label")?,
+                string_opt(&args, "rationale"),
+                args.get("reported_by")
+                    .and_then(Value::as_str)
+                    .unwrap_or("owner_question"),
+            )
+            .await
+            .map_err(|e| (-32602, e.to_string()))?;
             json!({"hypothesis_id":id,"status":"unreviewed","message":"Question recorded for veterinary review, not diagnosed."})
         }
         "review_clinical_hypothesis" => {
-            if args.get("confirm").and_then(Value::as_bool)!=Some(true) {
-                return Err((-32602,"Explicit owner approval (confirm:true) is required.".into()));
+            if args.get("confirm").and_then(Value::as_bool) != Some(true) {
+                return Err((
+                    -32602,
+                    "Explicit owner approval (confirm:true) is required.".into(),
+                ));
             }
-            let changed=clinical_cases::set_hypothesis_status(&state.db,user.household_id,integer(&args,"case_id")?,
-                integer(&args,"hypothesis_id")?,&user.audit_actor(),&string(&args,"status")?,
-                &string(&args,"rationale")?,&string(&args,"reported_by")?).await
-                .map_err(|e|(-32602,e.to_string()))?;
-            if !changed { return Err((-32602,"Hypothesis not found.".into())); }
+            let changed = clinical_cases::set_hypothesis_status(
+                &state.db,
+                user.household_id,
+                integer(&args, "case_id")?,
+                integer(&args, "hypothesis_id")?,
+                &user.audit_actor(),
+                &string(&args, "status")?,
+                &string(&args, "rationale")?,
+                &string(&args, "reported_by")?,
+            )
+            .await
+            .map_err(|e| (-32602, e.to_string()))?;
+            if !changed {
+                return Err((-32602, "Hypothesis not found.".into()));
+            }
             json!({"updated":true,"note":"Vet assessment, if present, is owner-relayed and not independently verified."})
         }
         "set_clinical_case_status" => {
-            if args.get("confirm").and_then(Value::as_bool)!=Some(true) {
-                return Err((-32602,"Explicit owner approval (confirm:true) is required.".into()));
+            if args.get("confirm").and_then(Value::as_bool) != Some(true) {
+                return Err((
+                    -32602,
+                    "Explicit owner approval (confirm:true) is required.".into(),
+                ));
             }
-            let changed=clinical_cases::set_status(&state.db,user.household_id,integer(&args,"case_id")?,
-                &user.audit_actor(),&string(&args,"status")?).await
-                .map_err(|e|(-32602,e.to_string()))?;
-            if !changed { return Err((-32602,"Investigation not found.".into())); }
+            let changed = clinical_cases::set_status(
+                &state.db,
+                user.household_id,
+                integer(&args, "case_id")?,
+                &user.audit_actor(),
+                &string(&args, "status")?,
+            )
+            .await
+            .map_err(|e| (-32602, e.to_string()))?;
+            if !changed {
+                return Err((-32602, "Investigation not found.".into()));
+            }
             json!({"updated":true})
         }
         "get_vet_case_brief" => {
-            let id=integer(&args,"case_id")?;
-            let detail=clinical_cases::get(&state.db,user.household_id,id).await.map_err(internal)?
-                .ok_or((-32602,"Investigation not found.".into()))?;
-            let pet_id=detail.investigation.pet_id;
+            let id = integer(&args, "case_id")?;
+            let detail = clinical_cases::get(&state.db, user.household_id, id)
+                .await
+                .map_err(internal)?
+                .ok_or((-32602, "Investigation not found.".into()))?;
+            let pet_id = detail.investigation.pet_id;
             json!({
                 "case":detail,
                 "prescriptions":db::list_prescriptions(&state.db,user.household_id,pet_id,30).await.map_err(internal)?,
@@ -1329,7 +1388,18 @@ async fn call_tool(
                 .get("symptom")
                 .and_then(Value::as_str)
                 .unwrap_or("vomiting");
-            if !matches!(symptom, "vomiting" | "diarrhea" | "reduced_appetite" | "wheezing" | "nasal_discharge" | "nasal_congestion" | "eye_discharge" | "coughing" | "labored_breathing") {
+            if !matches!(
+                symptom,
+                "vomiting"
+                    | "diarrhea"
+                    | "reduced_appetite"
+                    | "wheezing"
+                    | "nasal_discharge"
+                    | "nasal_congestion"
+                    | "eye_discharge"
+                    | "coughing"
+                    | "labored_breathing"
+            ) {
                 return Err((-32602, "symptom is not supported.".into()));
             }
             let minutes_ago = args
