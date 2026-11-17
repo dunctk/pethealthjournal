@@ -261,3 +261,86 @@ mod tests {
         assert!(bounded("   ",120,"title").is_err());
     }
 }
+
+
+// Web forms deliberately use the same repository functions as MCP; all routes
+// are mounted inside web::router's authenticated + same-origin protected router.
+use askama::Template;
+use axum::{Extension, Form, extract::{Path, Query, State}, http::StatusCode, response::{Html, Redirect}};
+use serde::Deserialize;
+use crate::{AppState, domain::{Pet, UserAccount, HealthEvent, MedicationPrescription, LabReport}};
+type WebError = (StatusCode, String);
+fn web_err(error: impl std::fmt::Display) -> WebError { (StatusCode::UNPROCESSABLE_ENTITY,error.to_string()) }
+fn missing() -> WebError { (StatusCode::NOT_FOUND, "Investigation not found".to_owned()) }
+fn rendered(template: &impl Template) -> Result<Html<String>,WebError> {
+    template.render().map(Html).map_err(|e|(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()))
+}
+#[derive(Deserialize)]
+pub struct PetCaseQuery { pet_id: i64 }
+#[derive(Deserialize)]
+pub struct NewCaseForm { pet_id: i64, title: String, presenting_concern: String }
+#[derive(Deserialize)]
+pub struct NewUpdateForm {
+    kind: String, original_wording: String,
+    observed_on: Option<String>, source: String, linked_event_id: Option<i64>,
+}
+#[derive(Deserialize)]
+pub struct NewHypothesisForm { label: String, rationale: Option<String>, reported_by: String }
+#[derive(Deserialize)]
+pub struct HypothesisStatusForm { status: String, rationale: String, reported_by: String }
+#[derive(Deserialize)]
+pub struct CaseStatusForm { status: String }
+#[derive(Template)]
+#[template(path="clinical_cases.html")]
+struct CasesPage { pet: Pet, investigations: Vec<ClinicalCase> }
+#[derive(Template)]
+#[template(path="clinical_case.html")]
+struct DetailPage { pet: Pet, detail: CaseDetail }
+#[derive(Template)]
+#[template(path="clinical_case_brief.html")]
+struct BriefPage {
+    pet: Pet, detail: CaseDetail, prescriptions: Vec<MedicationPrescription>,
+    events: Vec<HealthEvent>, labs: Vec<LabReport>,
+}
+pub async fn list_page(State(state): State<AppState>,Extension(user): Extension<UserAccount>,Query(query): Query<PetCaseQuery>) -> Result<Html<String>,WebError> {
+    let pet=db::get_pet(&state.db,user.household_id,query.pet_id).await.map_err(web_err)?.ok_or_else(missing)?;
+    let investigations=list(&state.db,user.household_id,pet.id).await.map_err(web_err)?;
+    rendered(&CasesPage{pet,investigations})
+}
+pub async fn create_form(State(state): State<AppState>,Extension(user): Extension<UserAccount>,Form(form): Form<NewCaseForm>) -> Result<Redirect,WebError> {
+    let id=create(&state.db,user.household_id,form.pet_id,&user.audit_actor(),&form.title,&form.presenting_concern).await.map_err(web_err)?;
+    Ok(Redirect::to(&format!("/clinical-cases/{id}")))
+}
+async fn load_for_user(state: &AppState, user: &UserAccount, id: i64) -> Result<(Pet,CaseDetail),WebError> {
+    let detail=get(&state.db,user.household_id,id).await.map_err(web_err)?.ok_or_else(missing)?;
+    let pet=db::get_pet(&state.db,user.household_id,detail.investigation.pet_id).await.map_err(web_err)?.ok_or_else(missing)?;
+    Ok((pet,detail))
+}
+pub async fn detail_page(State(state): State<AppState>,Extension(user): Extension<UserAccount>,Path(id): Path<i64>) -> Result<Html<String>,WebError> {
+    let (pet,detail)=load_for_user(&state,&user,id).await?;
+    rendered(&DetailPage{pet,detail})
+}
+pub async fn add_update_form(State(state): State<AppState>,Extension(user): Extension<UserAccount>,Path(id): Path<i64>,Form(form): Form<NewUpdateForm>) -> Result<Redirect,WebError> {
+    add_update(&state.db,user.household_id,id,&user.audit_actor(),&form.kind,&form.original_wording,form.observed_on.as_deref(),&form.source,form.linked_event_id).await.map_err(web_err)?;
+    Ok(Redirect::to(&format!("/clinical-cases/{id}")))
+}
+pub async fn add_hypothesis_form(State(state): State<AppState>,Extension(user): Extension<UserAccount>,Path(id): Path<i64>,Form(form): Form<NewHypothesisForm>) -> Result<Redirect,WebError> {
+    add_hypothesis(&state.db,user.household_id,id,&user.audit_actor(),&form.label,form.rationale.as_deref(),&form.reported_by).await.map_err(web_err)?;
+    Ok(Redirect::to(&format!("/clinical-cases/{id}")))
+}
+pub async fn hypothesis_status_form(State(state): State<AppState>,Extension(user): Extension<UserAccount>,Path((id,hypothesis_id)): Path<(i64,i64)>,Form(form): Form<HypothesisStatusForm>) -> Result<Redirect,WebError> {
+    if !set_hypothesis_status(&state.db,user.household_id,id,hypothesis_id,&user.audit_actor(),&form.status,&form.rationale,&form.reported_by).await.map_err(web_err)? { return Err(missing()); }
+    Ok(Redirect::to(&format!("/clinical-cases/{id}")))
+}
+pub async fn case_status_form(State(state): State<AppState>,Extension(user): Extension<UserAccount>,Path(id): Path<i64>,Form(form): Form<CaseStatusForm>) -> Result<Redirect,WebError> {
+    if !set_status(&state.db,user.household_id,id,&user.audit_actor(),&form.status).await.map_err(web_err)? { return Err(missing()); }
+    Ok(Redirect::to(&format!("/clinical-cases/{id}")))
+}
+pub async fn brief_page(State(state): State<AppState>,Extension(user): Extension<UserAccount>,Path(id): Path<i64>) -> Result<Html<String>,WebError> {
+    let (pet,detail)=load_for_user(&state,&user,id).await?;
+    // Context is clearly separated from investigation-specific updates.
+    let prescriptions=db::list_prescriptions(&state.db,user.household_id,pet.id,30).await.map_err(web_err)?;
+    let events=db::list_events(&state.db,user.household_id,Some(pet.id),40).await.map_err(web_err)?;
+    let labs=db::list_lab_reports(&state.db,user.household_id,pet.id).await.map_err(web_err)?;
+    rendered(&BriefPage{pet,detail,prescriptions,events,labs})
+}
