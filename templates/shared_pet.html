@@ -2,5 +2,15 @@
 <body class="shared-page"><header class="shared-top"><span class="brand"><img class="brand-mark" src="/static/logo.svg" alt="">Pet Health Journal</span><span class="readonly-badge">SHARED PET HISTORY</span></header>
 <main class="shared-record"><section class="pet-header"><div><div class="eyebrow">SHARED BY PET OWNER</div><h1>{{ pet.name }}</h1><p>{{ pet.species }}{% match pet.breed %}{% when Some with (breed) %} · {{ breed }}{% when None %}{% endmatch %}</p></div></section>
 <div class="share-notice">This history was shared with <b>{{ grant.label }}</b>. The owner can stop access at any time. This link expires {{ grant.expires_at }}.</div>
+<section class="timeline-region"><div class="section-head"><div><span class="eyebrow">CLINICAL INVESTIGATIONS</span><h2>Open concerns and vet questions</h2></div></div>
+<p>Owner-maintained case notes and possible explanations. Nothing here is a diagnosis. Veterinary remarks are the owner's account unless confirmed in clinical records.</p>
+{% if cases.is_empty() %}<p>No clinical investigations recorded.</p>{% endif %}
+{% for case in cases %}
+<article class="event-row"><div class="event-body"><h3>{{ case.investigation.title }} <small>({{ case.investigation.status }})</small></h3><p>{{ case.investigation.presenting_concern }}</p>
+<h4>Symptom, treatment and response timeline</h4>
+{% for item in case.updates %}<p><b>{{ item.kind }}:</b> {% match item.observed_on %}{% when Some with (date) %}{{ date }}{% when None %}Date unknown{% endmatch %} — {{ item.original_wording }} <small>({% if item.source == "owner_relayed_vet" %}owner relaying vet{% else %}owner{% endif %})</small></p>{% endfor %}
+<h4>Possible explanations (not diagnoses)</h4>
+{% for hypothesis in case.hypotheses %}<p>{{ hypothesis.label }} — {{ hypothesis.status }}{% match hypothesis.rationale %}{% when Some with (r) %}: {{ r }}{% when None %}{% endmatch %} <small>({% if hypothesis.reported_by == "owner_relayed_vet" %}owner relaying vet{% else %}owner question{% endif %})</small></p>{% endfor %}
+</div></article>{% endfor %}</section>
 <section class="timeline-region"><div class="section-head"><div><span class="eyebrow">PET HEALTH HISTORY</span><h2>Timeline</h2></div><span>{{ events.len() }} events</span></div><div class="timeline">{% for event in events %}<article class="event-row"><div class="event-rail"><span class="event-icon {{ event.tone }}">{{ event.icon }}</span><i></i></div><div class="event-body"><div class="event-meta"><span class="type {{ event.tone }}">{{ event.event_type }}</span><time>{{ event.occurred_label }}</time></div><h3>{{ event.summary }}</h3><p>“{{ event.raw_input }}”</p></div></article>{% endfor %}</div></section>
 <p class="medical-note">This history can help with care, but it does not replace an exam or advice from a veterinary professional.</p></main></body></html>
