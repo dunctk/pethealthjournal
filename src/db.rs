@@ -4428,6 +4428,34 @@ mod tests {
         assert_eq!(new.concentration_value, Some(4.0));
         assert_eq!(new.route.as_deref(), Some("oral"));
 
+        // A confirmed historical stop with no reliable effective date must
+        // leave ended_on NULL, and its event must be recorded_only.
+        let unknown_stop = update_prescription(
+            &db,
+            1,
+            "user:1",
+            &pet,
+            changed.current_prescription_id,
+            "active",
+            &PrescriptionChange::Stop { ended_on: None },
+            "It stopped some time ago; exact date unknown",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let stopped = get_prescription(&db, 1, pet_id, unknown_stop.current_prescription_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stopped.status, "stopped");
+        assert_eq!(stopped.ended_on, None);
+        let event = get_event(&db, 1, pet_id, unknown_stop.event_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.temporal_precision, "recorded_only");
+        assert!(event.details.as_deref().unwrap_or("").contains("date unknown"));
+
         // Another household cannot touch it.
         assert!(
             update_prescription(
