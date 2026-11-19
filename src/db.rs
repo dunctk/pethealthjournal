@@ -4453,7 +4453,17 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(event.temporal_precision, "recorded_only");
+        let precision_row = db
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT temporal_precision FROM health_events WHERE id=? AND household_id=?",
+                [unknown_stop.event_id.into(), 1_i64.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let precision: String = precision_row.try_get("", "temporal_precision").unwrap();
+        assert_eq!(precision, "recorded_only");
         assert!(event.details.as_deref().unwrap_or("").contains("date unknown"));
 
         // Another household cannot touch it.
