@@ -3069,11 +3069,12 @@ pub async fn confirm_medication_plan_stop(
 }
 
 /// An owner-confirmed change to one existing prescription, requested by an
-/// MCP client. Dates are server-computed from relative day offsets.
+/// MCP client. Known dates are server-computed from relative day offsets.
+/// None means the actual effective date was not supplied, not that it was today.
 #[derive(Clone, Debug)]
 pub enum PrescriptionChange {
     Stop {
-        ended_on: NaiveDate,
+        ended_on: Option<NaiveDate>,
     },
     Pause,
     Resume,
@@ -3084,7 +3085,7 @@ pub enum PrescriptionChange {
         concentration_value: Option<f64>,
         concentration_unit: Option<String>,
         instructions: Option<String>,
-        effective_on: NaiveDate,
+        effective_on: Option<NaiveDate>,
     },
 }
 
@@ -3136,7 +3137,7 @@ pub async fn update_prescription(
     let (new_status, ended_on, concept, summary, occurred_on) = match change {
         PrescriptionChange::Stop { ended_on } => (
             "stopped",
-            Some(ended_on.to_string()),
+            ended_on.map(|day| day.to_string()),
             "medication_plan_stop",
             format!("Stopped {}", current.name),
             *ended_on,
@@ -3146,18 +3147,18 @@ pub async fn update_prescription(
             None,
             "medication_plan_pause",
             format!("Paused {}", current.name),
-            now.date_naive(),
+            Some(now.date_naive()),
         ),
         PrescriptionChange::Resume => (
             "active",
             None,
             "medication_plan_resume",
             format!("Resumed {}", current.name),
-            now.date_naive(),
+            Some(now.date_naive()),
         ),
         PrescriptionChange::ChangeDose { effective_on, .. } => (
             "stopped",
-            Some(effective_on.to_string()),
+            effective_on.map(|day| day.to_string()),
             "medication_plan_change",
             String::new(),
             *effective_on,
@@ -3233,7 +3234,7 @@ pub async fn update_prescription(
                     frequency.clone().into(),
                     current.route.clone().into(),
                     instructions.clone().or(current.instructions.clone()).into(),
-                    effective_on.to_string().into(),
+                    effective_on.map(|day| day.to_string()).into(),
                     "active".into(),
                     raw_input.into(),
                     now_text.clone().into(),
@@ -3263,14 +3264,28 @@ pub async fn update_prescription(
         result_status = "active".into();
     }
 
-    let occurred_at = if occurred_on == now.date_naive() {
-        now_text.clone()
-    } else {
-        occurred_on
-            .and_hms_opt(12, 0, 0)
-            .ok_or_else(|| anyhow!("invalid date"))?
-            .and_utc()
-            .to_rfc3339()
+    // A record made today does not prove that an older treatment stopped
+    // today. For unknown onset dates, preserve the recorded timestamp but
+    // label its temporal precision so timelines/vet exports do not invent one.
+    let (occurred_at, temporal_precision, event_details) = match occurred_on {
+        None => (
+            now_text.clone(),
+            "recorded_only",
+            "Owner-confirmed prescription update; actual effective date unknown.",
+        ),
+        Some(day) if day == now.date_naive() => (
+            now_text.clone(),
+            "confirmed_now",
+            "Owner-confirmed prescription update via MCP.",
+        ),
+        Some(day) => (
+            day.and_hms_opt(12, 0, 0)
+                .ok_or_else(|| anyhow!("invalid date"))?
+                .and_utc()
+                .to_rfc3339(),
+            "day",
+            "Owner-confirmed prescription update via MCP.",
+        ),
     };
     let event_row = transaction
         .query_one(Statement::from_sql_and_values(
@@ -3285,10 +3300,10 @@ pub async fn update_prescription(
                 concept.into(),
                 summary.into(),
                 raw_input.into(),
-                "Owner-confirmed prescription update via MCP.".into(),
+                event_details.into(),
                 occurred_at.into(),
                 now_text.clone().into(),
-                (if occurred_on == now.date_naive() { "confirmed_now" } else { "day" }).into(),
+                temporal_precision.into(),
                 "mcp".into(),
             ],
         ))
@@ -4388,7 +4403,7 @@ mod tests {
                 concentration_value: None,
                 concentration_unit: None,
                 instructions: None,
-                effective_on: today,
+                effective_on: Some(today),
             },
             "Vet upped it to 0.5 ml",
         )
@@ -4422,7 +4437,7 @@ mod tests {
                 &pet,
                 changed.current_prescription_id,
                 "active",
-                &PrescriptionChange::Stop { ended_on: today },
+                &PrescriptionChange::Stop { ended_on: Some(today) },
                 "x"
             )
             .await
