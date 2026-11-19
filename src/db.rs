@@ -4464,7 +4464,13 @@ mod tests {
             .unwrap();
         let precision: String = precision_row.try_get("", "temporal_precision").unwrap();
         assert_eq!(precision, "recorded_only");
-        assert!(event.details.as_deref().unwrap_or("").contains("date unknown"));
+        assert!(
+            event
+                .details
+                .as_deref()
+                .unwrap_or("")
+                .contains("date unknown")
+        );
 
         // Another household cannot touch it.
         assert!(
@@ -4475,7 +4481,9 @@ mod tests {
                 &pet,
                 changed.current_prescription_id,
                 "active",
-                &PrescriptionChange::Stop { ended_on: Some(today) },
+                &PrescriptionChange::Stop {
+                    ended_on: Some(today)
+                },
                 "x"
             )
             .await
