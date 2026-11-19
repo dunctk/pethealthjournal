@@ -2614,7 +2614,7 @@ mod tests {
         let base = json!({"pet_id":1,"prescription_id":2,"action":"stop","message":"Vet stopped it","confirm":true,"effective_days_ago":3});
         let ok = parse_prescription_change(&base, "active", today).unwrap();
         assert!(
-            matches!(ok.change, db::PrescriptionChange::Stop { ended_on } if ended_on == day("2026-11-12"))
+            matches!(ok.change, db::PrescriptionChange::Stop { ended_on } if ended_on == Some(day("2026-11-12")))
         );
         let mut unconfirmed = base.clone();
         unconfirmed["confirm"] = json!(false);
