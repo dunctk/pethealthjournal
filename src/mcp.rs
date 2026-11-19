@@ -1209,9 +1209,15 @@ async fn call_tool(
             let names = args
                 .get("reported_current_medicines")
                 .and_then(Value::as_array)
-                .ok_or((-32602, "reported_current_medicines must be an array of medicine names.".into()))?;
+                .ok_or((
+                    -32602,
+                    "reported_current_medicines must be an array of medicine names.".into(),
+                ))?;
             if names.len() > 30 {
-                return Err((-32602, "At most 30 reported medicine names are supported.".into()));
+                return Err((
+                    -32602,
+                    "At most 30 reported medicine names are supported.".into(),
+                ));
             }
             let mut current_names = Vec::<String>::new();
             for item in names {
@@ -1219,23 +1225,36 @@ async fn call_tool(
                     .as_str()
                     .map(str::trim)
                     .filter(|s| !s.is_empty() && s.chars().count() <= 120)
-                    .ok_or((-32602, "Each medicine name must contain 1–120 characters.".into()))?;
-                if !current_names.iter().any(|known| known.eq_ignore_ascii_case(name)) {
+                    .ok_or((
+                        -32602,
+                        "Each medicine name must contain 1–120 characters.".into(),
+                    ))?;
+                if !current_names
+                    .iter()
+                    .any(|known| known.eq_ignore_ascii_case(name))
+                {
                     current_names.push(name.to_owned());
                 }
             }
             let plan = db::medication_plan(&state.db, user.household_id, pet_id, 100)
                 .await
                 .map_err(internal)?;
-            let active: Vec<_> = plan.prescriptions.iter().filter(|p| p.status == "active").collect();
+            let active: Vec<_> = plan
+                .prescriptions
+                .iter()
+                .filter(|p| p.status == "active")
+                .collect();
             let candidate_stops: Vec<_> = active
                 .iter()
                 .filter(|prescription| {
-                    !current_names.iter().any(|name| name.eq_ignore_ascii_case(&prescription.name))
+                    !current_names
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(&prescription.name))
                 })
                 .map(|p| json!({"prescription_id":p.id,"name":p.name,"current_status":p.status}))
                 .collect();
-            let reported_not_in_active: Vec<_> = current_names.iter()
+            let reported_not_in_active: Vec<_> = current_names
+                .iter()
                 .filter(|name| !active.iter().any(|p| p.name.eq_ignore_ascii_case(name)))
                 .cloned()
                 .collect();
@@ -2184,7 +2203,11 @@ fn parse_prescription_change(
     // Omitting the date means unknown, not today. Callers may explicitly
     // send 0 only when the owner confirms the change took effect today.
     let days_ago = match args.get("effective_days_ago").filter(|v| !v.is_null()) {
-        Some(value) => Some(value.as_i64().ok_or("effective_days_ago must be an integer.")?),
+        Some(value) => Some(
+            value
+                .as_i64()
+                .ok_or("effective_days_ago must be an integer.")?,
+        ),
         None => None,
     };
     if days_ago.is_some_and(|days| !(0..=3650).contains(&days)) {
@@ -2613,10 +2636,19 @@ mod tests {
         // An omitted date is unknown, never silently the recording date.
         let unknown = json!({"pet_id":1,"prescription_id":2,"action":"stop","message":"It was stopped earlier; exact date unknown","confirm":true});
         let parsed = parse_prescription_change(&unknown, "active", today).unwrap();
-        assert!(matches!(parsed.change, db::PrescriptionChange::Stop { ended_on: None }));
+        assert!(matches!(
+            parsed.change,
+            db::PrescriptionChange::Stop { ended_on: None }
+        ));
         let unknown_change = json!({"pet_id":1,"prescription_id":2,"action":"change_dose","dose_value":0.3,"message":"Dose is now 0.3 ml but we do not know when it started","confirm":true});
         let parsed = parse_prescription_change(&unknown_change, "active", today).unwrap();
-        assert!(matches!(parsed.change, db::PrescriptionChange::ChangeDose { effective_on: None, .. }));
+        assert!(matches!(
+            parsed.change,
+            db::PrescriptionChange::ChangeDose {
+                effective_on: None,
+                ..
+            }
+        ));
         let invalid = json!({"pet_id":1,"prescription_id":2,"action":"stop","message":"Stopped","confirm":true,"effective_days_ago":"yesterday"});
         assert!(parse_prescription_change(&invalid, "active", today).is_err());
     }
