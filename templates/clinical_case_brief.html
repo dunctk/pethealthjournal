@@ -26,7 +26,7 @@ pre{white-space:pre-wrap} .notice{border-left:4px solid #d7b66b;padding:12px;bac
 {% if prescriptions.is_empty() %}<p>No prescriptions recorded.</p>{% endif %}
 {% for p in prescriptions %}<article><strong>{{ p.name }}</strong> · {{ p.status }}
 <p>{% match p.started_on %}{% when Some with (day) %}From {{ day }}{% when None %}Start unknown{% endmatch %}
-{% match p.ended_on %}{% when Some with (day) %} to {{ day }}{% when None %}{% endmatch %}
+{% match p.ended_on %}{% when Some with (day) %} to {{ day }}{% when None %}{% if p.status == "stopped" %} · Actual stop date unknown{% endif %}{% endmatch %}
 {% match p.dose_value %}{% when Some with (dose) %} · {{ dose }}{% match p.dose_unit %}{% when Some with (unit) %} {{ unit }}{% when None %}{% endmatch %}{% when None %}{% endmatch %}
 {% match p.frequency %}{% when Some with (freq) %} · {{ freq }}{% when None %}{% endmatch %}</p></article>{% endfor %}</section>
 <section class="panel"><h2>Recent pet health history (up to 40 events, may include unrelated records)</h2>
