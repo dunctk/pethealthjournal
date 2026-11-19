@@ -14,6 +14,14 @@ The application also creates expiring, revocable, read-only vet links. Share tok
 
 Track unresolved problems across symptoms, treatments, responses, vet findings and open questions without conflating hypotheses with diagnoses. Open Clinical investigations on the pet dashboard or use MCP tools such as open_clinical_case, add_clinical_case_update, add_clinical_hypothesis and get_vet_case_brief. Existing expiring, revocable vet-share pages include case summaries. See [documentation](docs/clinical-investigations.md).
 
+## Medication history and owner-reviewed reconciliation
+
+The active prescription list is **not** inferred from health notes. When an owner reports that the current medicines differ from the structured plan, MCP clients should call `review_medication_plan` with the owner-confirmed medicine names. It compares exact names and returns **possible** stale active prescriptions and missing current medicines. The tool is read-only; name variants, dose and timing must still be reviewed. To apply a change, call `update_prescription` for each prescription after explicit owner approval.
+
+For `update_prescription`, `effective_days_ago` is optional on `stop` and `change_dose`. **Omit it if the actual stop/change date is unknown**. To explicitly record that the change took effect today, pass `effective_days_ago: 0`; otherwise supply a verified relative date. An unknown date is stored as `NULL` in `ended_on`/`started_on`; the timeline event is labelled `recorded_only` so its timestamp is not misrepresented as the date treatment changed. Historical prescriptions and original owner wording remain intact. Already-incorrect legacy dates require separate source review; this change does not retroactively reinterpret them.
+
+Treatment attempts, symptom responses and owner-relayed vet interpretations belong in the existing clinical-investigation updates until the planned first-class treatment-course model is delivered. Do not infer dosage, causation, or a diagnosis from chronological proximity.
+
 ## Proactive AI and model costs
 
 **Roadmap only:** proactive monitoring is not running today. Future deterministic checks can calculate weight changes, event frequencies and similar measurable patterns without an LLM. Scheduled AI summaries would be optional, bounded and evidence-backed, never a diagnosis or emergency-monitoring guarantee.

@@ -388,6 +388,53 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
         .ok(&owner, "get_medication_plan", json!({"pet_id":pet_id}))
         .await;
     assert!(plan.to_string().contains("0.5"));
+    // Owner-reported current medicines are compared read-only; no regimen
+    // changes unless the owner separately approves update_prescription.
+    let review = h
+        .ok(
+            &owner,
+            "review_medication_plan",
+            json!({
+                "pet_id":pet_id,
+                "reported_current_medicines":["Doxybactin"],
+            }),
+        )
+        .await;
+    assert_eq!(review["needs_owner_review"], true);
+    assert_eq!(
+        review["possible_stale_active_prescriptions"][0]["name"],
+        "Semintra"
+    );
+    assert_eq!(
+        review["reported_medicines_missing_from_active_plan"][0],
+        "Doxybactin"
+    );
+    let stop = h
+        .ok(
+            &owner,
+            "update_prescription",
+            json!({
+                "pet_id":pet_id,
+                "prescription_id":change["current_prescription_id"],
+                "action":"stop",
+                "message":"Owner says discontinued previously, actual date unknown",
+                "confirm":true
+            }),
+        )
+        .await;
+    assert_eq!(stop["new_status"], "stopped");
+    let stopped_plan = h
+        .ok(&owner, "get_medication_plan", json!({"pet_id":pet_id}))
+        .await;
+    let id = change["current_prescription_id"].as_i64().unwrap();
+    let stopped = stopped_plan["prescriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"].as_i64() == Some(id))
+        .unwrap();
+    assert_eq!(stopped["status"], "stopped");
+    assert!(stopped["ended_on"].is_null());
     h.ok(&owner, "get_clinical_timeline", json!({"pet_id":pet_id}))
         .await;
 
