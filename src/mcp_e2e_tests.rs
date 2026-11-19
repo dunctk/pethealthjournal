@@ -426,7 +426,7 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
     let stopped_plan = h
         .ok(&owner, "get_medication_plan", json!({"pet_id":pet_id}))
         .await;
-    let id = change["current_prescription_id"];
+    let id = &change["current_prescription_id"];
     let stopped = stopped_plan["prescriptions"]
         .as_array()
         .unwrap()
