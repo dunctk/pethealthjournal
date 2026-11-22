@@ -198,7 +198,7 @@ pub async fn get(
     let Some(row) = row else { return Ok(None) };
     let investigation = case_from_row(row)?;
     let updates=db.query_all(Statement::from_sql_and_values(DbBackend::Sqlite,
-        "SELECT id,case_id,kind,original_wording,observed_on,source,linked_event_id,created_at FROM clinical_case_updates WHERE household_id=? AND pet_id=? AND case_id=? ORDER BY created_at ASC,id ASC LIMIT 500",
+        "SELECT id,case_id,kind,original_wording,observed_on,source,linked_event_id,created_at FROM clinical_case_updates WHERE household_id=? AND pet_id=? AND case_id=? ORDER BY observed_on IS NULL, observed_on ASC, created_at ASC, id ASC LIMIT 500",
         [household.into(),investigation.pet_id.into(),case_id.into()],
     )).await?.into_iter().map(update_from_row).collect::<Result<Vec<_>>>()?;
     let hypotheses=db.query_all(Statement::from_sql_and_values(DbBackend::Sqlite,

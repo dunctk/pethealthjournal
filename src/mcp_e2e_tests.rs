@@ -576,6 +576,20 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
         )
         .await;
     assert!(observation["case_update_id"].as_i64().unwrap() > 0);
+    for (date, wording) in [
+        ("2020-06-01", "Later observation"),
+        ("2019-01-01", "Earlier observation"),
+    ] {
+        h.ok(
+            &owner,
+            "add_clinical_case_update",
+            json!({
+                "case_id":case_id,"kind":"observation","original_wording":wording,
+                "observed_on":date,"source":"owner_reported"
+            }),
+        )
+        .await;
+    }
     let hypothesis=h.ok(&owner,"add_clinical_hypothesis",json!({
         "case_id":case_id,"label":"Could a medication contribute?","reported_by":"owner_question"
     })).await;
@@ -605,8 +619,17 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
         .await;
     assert_eq!(
         detail["updates"][0]["original_wording"],
+        "Earlier observation"
+    );
+    assert_eq!(
+        detail["updates"][1]["original_wording"],
+        "Later observation"
+    );
+    assert_eq!(
+        detail["updates"][2]["original_wording"],
         "Occasional wheezing"
     );
+    assert!(detail["updates"][2]["observed_on"].is_null());
     let brief = h
         .ok(&owner, "get_vet_case_brief", json!({"case_id":case_id}))
         .await;
