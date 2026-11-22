@@ -6,6 +6,7 @@ Clinical investigations are problem-oriented records alongside the existing chro
 
 - A pet can have multiple cases, each with a presenting concern and state (open / monitoring / resolved).
 - Updates are chronological observations, treatment courses, responses, owner-relayed vet findings, tests or questions. Original words are preserved. Observed date is optional and must never be invented; recorded time is server-owned.
+- Case pages and briefs sort dated updates by their observed date, then show undated updates separately at the end in recording order. The recording timestamp is not evidence of when an undated event happened.
 - An update may reference a same-pet active health event. It never changes or double-counts that event.
 - Possible explanations are hypotheses, always initially unreviewed. Vet-supported or vet-ruled-out labels can only be recorded when the owner explicitly relays a veterinary assessment; this is not independent vet authentication.
 - Never infer a diagnosis, causal medication reaction, or recommend medication changes. An assistant can suggest questions with clear uncertainty and sources.
