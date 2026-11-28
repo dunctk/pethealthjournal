@@ -14,6 +14,6 @@ Pet Health Journal is a source-available, self-hostable pet health record with M
 
 Core history, safety, household scoping and record portability remain design priorities. No listed roadmap item is a commitment, and there is currently no Stripe checkout or paid-feature enforcement. The self-hosted application defaults to `DEPLOYMENT_MODE=self_hosted` and requires no paid subscription.
 
-`record_observation` is now a no-LLM MCP path for ordinary owner notes. The legacy in-app AI remains. `PROACTIVE_AI_ENABLED` is a reserved configuration guard only; there is no proactive worker, notification system or paid entitlement enforcement yet.
+`record_observation` and the Food & Nutrition Diary tools (`record_food_intake`, `add_food`, `get_food_diary_summary`, `get_nutrition_trends`, etc.) are no-LLM MCP paths. Future nutrition additions include water-intake tracking, barcode lookup, and optional label photo extraction. The legacy in-app AI remains. `PROACTIVE_AI_ENABLED` is a reserved configuration guard only; there is no proactive worker, notification system or paid entitlement enforcement yet.
 
-See [README.md](README.md) and [docs/ai-architecture.md](docs/ai-architecture.md) for current behavior and future plans.
+See [README.md](README.md), [docs/ai-architecture.md](docs/ai-architecture.md), and [docs/food-nutrition-diary.md](docs/food-nutrition-diary.md) for current behavior and future plans.

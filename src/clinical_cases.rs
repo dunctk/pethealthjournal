@@ -66,6 +66,7 @@ pub struct CaseUpdate {
     pub observed_on: Option<String>,
     pub source: String,
     pub linked_event_id: Option<i64>,
+    pub linked_food_entry_id: Option<i64>,
     pub created_at: String,
 }
 #[derive(Clone, Debug, Serialize)]
@@ -130,6 +131,7 @@ fn update_from_row(row: QueryResult) -> Result<CaseUpdate> {
         observed_on: row.try_get("", "observed_on")?,
         source: row.try_get("", "source")?,
         linked_event_id: row.try_get("", "linked_event_id")?,
+        linked_food_entry_id: row.try_get("", "linked_food_entry_id").ok().flatten(),
         created_at: row.try_get("", "created_at")?,
     })
 }
@@ -198,7 +200,7 @@ pub async fn get(
     let Some(row) = row else { return Ok(None) };
     let investigation = case_from_row(row)?;
     let updates=db.query_all(Statement::from_sql_and_values(DbBackend::Sqlite,
-        "SELECT id,case_id,kind,original_wording,observed_on,source,linked_event_id,created_at FROM clinical_case_updates WHERE household_id=? AND pet_id=? AND case_id=? ORDER BY observed_on IS NULL, observed_on ASC, created_at ASC, id ASC LIMIT 500",
+        "SELECT id,case_id,kind,original_wording,observed_on,source,linked_event_id,linked_food_entry_id,created_at FROM clinical_case_updates WHERE household_id=? AND pet_id=? AND case_id=? ORDER BY observed_on IS NULL, observed_on ASC, created_at ASC, id ASC LIMIT 500",
         [household.into(),investigation.pet_id.into(),case_id.into()],
     )).await?.into_iter().map(update_from_row).collect::<Result<Vec<_>>>()?;
     let hypotheses=db.query_all(Statement::from_sql_and_values(DbBackend::Sqlite,
@@ -253,6 +255,7 @@ pub async fn add_update(
     observed_on: Option<&str>,
     source: &str,
     linked_event_id: Option<i64>,
+    linked_food_entry_id: Option<i64>,
 ) -> Result<i64> {
     let detail = get(db, household, case_id)
         .await?
@@ -282,11 +285,26 @@ pub async fn add_update(
             ));
         }
     }
+    if let Some(food_entry_id) = linked_food_entry_id {
+        if crate::nutrition::get_active_food_entry_for_pet(
+            db,
+            household,
+            detail.investigation.pet_id,
+            food_entry_id,
+        )
+        .await?
+        .is_none()
+        {
+            return Err(anyhow!(
+                "linked food entry must be an active feeding record belonging to this pet"
+            ));
+        }
+    }
     let now = Utc::now().to_rfc3339();
     let tx = db.begin().await?;
     let row=tx.query_one(Statement::from_sql_and_values(DbBackend::Sqlite,
-        "INSERT INTO clinical_case_updates(household_id,pet_id,case_id,kind,original_wording,observed_on,source,linked_event_id,created_at) VALUES(?,?,?,?,?,?,?,?,?) RETURNING id",
-        [household.into(),detail.investigation.pet_id.into(),case_id.into(),kind.into(),wording.clone().into(),date.into(),source.into(),linked_event_id.into(),now.clone().into()],
+        "INSERT INTO clinical_case_updates(household_id,pet_id,case_id,kind,original_wording,observed_on,source,linked_event_id,linked_food_entry_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?) RETURNING id",
+        [household.into(),detail.investigation.pet_id.into(),case_id.into(),kind.into(),wording.clone().into(),date.into(),source.into(),linked_event_id.into(),linked_food_entry_id.into(),now.clone().into()],
     )).await?.ok_or_else(|| anyhow!("update insert failed"))?;
     let id: i64 = row.try_get("", "id")?;
     touched(&tx, household, case_id, &now).await?;
@@ -498,6 +516,7 @@ pub struct NewUpdateForm {
     observed_on: Option<String>,
     source: String,
     linked_event_id: Option<i64>,
+    linked_food_entry_id: Option<i64>,
 }
 #[derive(Deserialize)]
 pub struct NewHypothesisForm {
@@ -535,6 +554,7 @@ struct BriefPage {
     prescriptions: Vec<MedicationPrescription>,
     events: Vec<HealthEvent>,
     labs: Vec<LabReport>,
+    nutrition: crate::nutrition::NutritionTrendReport,
 }
 pub async fn list_page(
     State(state): State<AppState>,
@@ -609,6 +629,7 @@ pub async fn add_update_form(
         form.observed_on.as_deref(),
         &form.source,
         form.linked_event_id,
+        form.linked_food_entry_id,
     )
     .await
     .map_err(web_err)?;
@@ -692,11 +713,22 @@ pub async fn brief_page(
     let labs = db::list_lab_reports(&state.db, user.household_id, pet.id)
         .await
         .map_err(web_err)?;
+    let today = Utc::now().date_naive();
+    let nutrition = crate::nutrition::load_trend_report(
+        &state.db,
+        user.household_id,
+        pet.id,
+        today - chrono::Duration::days(29),
+        today,
+    )
+    .await
+    .map_err(web_err)?;
     rendered(&BriefPage {
         pet,
         detail,
         prescriptions,
         events,
         labs,
+        nutrition,
     })
 }

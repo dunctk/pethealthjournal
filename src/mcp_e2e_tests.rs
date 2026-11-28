@@ -699,6 +699,7 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
     assert_eq!(pets["items"].as_array().unwrap().len(), 0);
 
     lab_integrity_scenario(&mut h, &owner, &stranger).await;
+    food_diary_scenario(&mut h, &owner, &stranger).await;
 
     // Every listed tool was exercised, except provider-backed ones.
     let missing: Vec<_> = tools
@@ -1059,4 +1060,269 @@ UREA / SUERO\n\nQuímica seca - Espectrofotometría\n\nRESULTADO... 63 ↑ mg/dL
         .try_get("", "n")
         .unwrap();
     assert_eq!(audits, 4);
+}
+
+async fn food_diary_scenario(h: &mut Harness, owner: &str, stranger: &str) {
+    let pet = h
+        .ok(
+            owner,
+            "add_pet",
+            json!({"name":"Nori","species":"Cat","weight_kg":3.9}),
+        )
+        .await;
+    let pet_id = pet["pet_id"].as_i64().unwrap();
+
+    // 1. Add reusable foods to household catalogue.
+    let renal = h
+        .ok(
+            owner,
+            "add_food",
+            json!({
+                "name": "Renal Chicken Pouch",
+                "brand": "VetRenal",
+                "category": "prescription_diet",
+                "completeness": "complete",
+                "serving_size_value": 85,
+                "serving_size_unit": "g",
+                "serving_label": "pouch",
+                "nutrition_basis": "per_100g",
+                "kcal_per_basis": 100,
+                "protein_g": 7.0,
+                "fat_g": 6.0,
+                "phosphorus_mg": 90,
+                "sodium_mg": 110,
+                "nutrition_confidence": "verified",
+                "nutrition_source": "Manufacturer 85g pouch label",
+                "is_favorite": true
+            }),
+        )
+        .await;
+    let renal_id = renal["food"]["id"].as_i64().unwrap();
+
+    let churu = h
+        .ok(
+            owner,
+            "add_food",
+            json!({
+                "name": "Churu Chicken",
+                "category": "treat",
+                "completeness": "complementary",
+                "serving_label": "tube",
+                "nutrition_basis": "per_serving",
+                "kcal_per_basis": 6,
+                "nutrition_confidence": "verified",
+                "nutrition_source": "Package label"
+            }),
+        )
+        .await;
+    let churu_id = churu["food"]["id"].as_i64().unwrap();
+
+    // list_foods is household-scoped.
+    let listed = h.ok(owner, "list_foods", json!({"query":"Renal"})).await;
+    assert_eq!(listed["count"], 1);
+    let stranger_foods = h.ok(stranger, "list_foods", json!({})).await;
+    assert_eq!(stranger_foods["count"], 0);
+
+    // 2. Atomic multi-item meal + retry idempotency.
+    let meal = h
+        .ok(
+            owner,
+            "record_food_intake",
+            json!({
+                "pet_id": pet_id,
+                "meal_label": "breakfast",
+                "original_wording": "Nori ate half a pouch of renal food and a Churu this morning",
+                "idempotency_key": "nori-breakfast-1",
+                "items": [
+                    {
+                        "food_item_id": renal_id,
+                        "intake_status": "consumed_partial",
+                        "appetite": "normal",
+                        "offered_amount": 1,
+                        "offered_unit": "pouch",
+                        "consumed_amount": 0.5,
+                        "consumed_unit": "pouch"
+                    },
+                    {
+                        "food_item_id": churu_id,
+                        "intake_status": "consumed_all",
+                        "appetite": "eager",
+                        "consumed_amount": 1,
+                        "consumed_unit": "tube"
+                    }
+                ]
+            }),
+        )
+        .await;
+    assert_eq!(meal["deduplicated"], false);
+    assert_eq!(meal["meal_kcal_subtotal"], 48.5);
+    let first_entry_id = meal["entries"][0]["id"].as_i64().unwrap();
+    let second_entry_id = meal["entries"][1]["id"].as_i64().unwrap();
+
+    let retry = h
+        .ok(
+            owner,
+            "record_food_intake",
+            json!({
+                "pet_id": pet_id,
+                "original_wording": "retry",
+                "idempotency_key": "nori-breakfast-1",
+                "items": [{"food_item_id": churu_id, "intake_status": "consumed_all"}]
+            }),
+        )
+        .await;
+    assert_eq!(retry["deduplicated"], true);
+    assert_eq!(retry["entries"].as_array().unwrap().len(), 2);
+
+    // 3. Update catalogue item; historical snapshot must stay unchanged.
+    let updated_food = h
+        .ok(
+            owner,
+            "update_food",
+            json!({"food_id": renal_id, "kcal_per_basis": 140}),
+        )
+        .await;
+    assert_eq!(updated_food["historical_snapshots_preserved"], true);
+    let intake_list = h
+        .ok(owner, "list_food_intake", json!({"pet_id": pet_id}))
+        .await;
+    assert_eq!(intake_list["total_matching"], 2);
+    let old_renal = intake_list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == first_entry_id)
+        .unwrap();
+    assert_eq!(old_renal["computed_kcal"], 42.5);
+
+    // 4. Correct an entry and soft-delete another.
+    let edited = h
+        .ok(
+            owner,
+            "update_food_intake",
+            json!({
+                "entry_id": first_entry_id,
+                "consumed_amount": 0.75,
+                "original_wording": "Actually ate three quarters of the renal pouch"
+            }),
+        )
+        .await;
+    assert_eq!(edited["entry"]["computed_kcal"], 63.75);
+
+    let deleted = h
+        .ok(
+            owner,
+            "delete_food_intake",
+            json!({"entry_id": second_entry_id}),
+        )
+        .await;
+    assert_eq!(deleted["deleted"], true);
+
+    // 5. Set explicit vet target, check summary & trends with clinical context.
+    h.ok(
+        owner,
+        "set_nutrition_target",
+        json!({
+            "pet_id": pet_id,
+            "daily_kcal_min": 180,
+            "daily_kcal_max": 210,
+            "source": "owner_relayed_vet",
+            "source_note": "Dr Jones renal follow-up"
+        }),
+    )
+    .await;
+
+    let summary = h
+        .ok(owner, "get_food_diary_summary", json!({"pet_id": pet_id}))
+        .await;
+    assert_eq!(summary["days"][0]["recorded_kcal"], 63.75);
+    assert_eq!(
+        summary["days"][0]["target_comparison"]["status"],
+        "below_range"
+    );
+
+    let trends = h
+        .ok(
+            owner,
+            "get_nutrition_trends",
+            json!({"pet_id": pet_id, "days": 30, "include_clinical_context": true}),
+        )
+        .await;
+    assert_eq!(trends["window_7d"]["days_with_entries"], 1);
+    assert!(
+        trends["clinical_context"]["caution"]
+            .as_str()
+            .unwrap()
+            .contains("causation")
+    );
+
+    // 6. Link food entry to clinical investigation & check brief includes nutrition.
+    let case = h
+        .ok(
+            owner,
+            "open_clinical_case",
+            json!({
+                "pet_id": pet_id,
+                "title": "Weight loss and selective appetite",
+                "presenting_concern": "Eating less of renal wet food"
+            }),
+        )
+        .await;
+    let case_id = case["case_id"].as_i64().unwrap();
+    h.ok(
+        owner,
+        "add_clinical_case_update",
+        json!({
+            "case_id": case_id,
+            "kind": "observation",
+            "original_wording": "Ate three quarters of renal pouch after warming",
+            "linked_food_entry_id": first_entry_id
+        }),
+    )
+    .await;
+    let brief = h
+        .ok(owner, "get_vet_case_brief", json!({"case_id": case_id}))
+        .await;
+    assert_eq!(
+        brief["nutrition_summary_30d"]["window_7d"]["days_with_entries"],
+        1
+    );
+
+    // 7. Cross-household denial on food tools.
+    h.err(stranger, "list_food_intake", json!({"pet_id": pet_id}))
+        .await;
+    h.err(
+        stranger,
+        "get_food_diary_summary",
+        json!({"pet_id": pet_id}),
+    )
+    .await;
+    h.err(stranger, "get_nutrition_trends", json!({"pet_id": pet_id}))
+        .await;
+    h.err(
+        stranger,
+        "update_food",
+        json!({"food_id": renal_id, "name": "Stolen"}),
+    )
+    .await;
+    h.err(
+        stranger,
+        "delete_food_intake",
+        json!({"entry_id": first_entry_id}),
+    )
+    .await;
+
+    // Clean up target + test pet.
+    h.ok(
+        owner,
+        "set_nutrition_target",
+        json!({"pet_id": pet_id, "clear": true}),
+    )
+    .await;
+    h.ok(
+        owner,
+        "delete_pet",
+        json!({"pet_id": pet_id, "confirm_name": "Nori", "confirm": true}),
+    )
+    .await;
 }

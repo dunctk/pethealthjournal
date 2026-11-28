@@ -175,6 +175,69 @@ pub fn build_timeline(entries: Vec<TimelineEntry>, cases: &[CaseDetail]) -> Vec<
                     facts,
                 }
             }
+            TimelineEntry::Food(food) => {
+                let mut facts = vec![
+                    fact("Food", food.display_food_name()),
+                    fact("Intake status", food.intake_status_label()),
+                    fact("Amount", food.amount_label()),
+                    fact("Calories", food.kcal_label()),
+                ];
+                optional(&mut facts, "Meal", food.meal_label.as_deref());
+                optional(&mut facts, "Appetite", food.appetite.as_deref());
+                optional(&mut facts, "Preparation", food.preparation.as_deref());
+                if let Some(p) = food.computed_protein_g {
+                    facts.push(fact("Protein", format!("{p:.1} g")));
+                }
+                if let Some(f) = food.computed_fat_g {
+                    facts.push(fact("Fat", format!("{f:.1} g")));
+                }
+                if let Some(ph) = food.computed_phosphorus_mg {
+                    facts.push(fact("Phosphorus", format!("{ph:.0} mg")));
+                }
+                if let Some(na) = food.computed_sodium_mg {
+                    facts.push(fact("Sodium", format!("{na:.0} mg")));
+                }
+                optional(
+                    &mut facts,
+                    "Nutrition basis",
+                    food.snapshot.nutrition_basis.as_deref(),
+                );
+                optional(
+                    &mut facts,
+                    "Nutrition source",
+                    food.snapshot.nutrition_source.as_deref(),
+                );
+                optional(
+                    &mut facts,
+                    "Calculation note",
+                    food.calculation_note.as_deref(),
+                );
+                optional(&mut facts, "Notes", food.notes.as_deref());
+                let date = food.effective_at();
+                ShareTimelineItem {
+                    anchor: format!("food-{}", food.id),
+                    date,
+                    date_label: if food.fed_at.is_some() {
+                        dated(date)
+                    } else {
+                        food.fed_on.clone()
+                    },
+                    date_note: match food.fed_time_precision.as_str() {
+                        "exact" => "Stated feeding time".into(),
+                        "approximate_time" => "Approximate feeding time".into(),
+                        "date_only" => "Feeding date recorded (time not specified)".into(),
+                        _ => "Recorded feeding entry".into(),
+                    },
+                    kind: format!("Food · {}", food.intake_status_label()),
+                    title: format!("{} · {}", food.display_food_name(), food.amount_label()),
+                    original_words: food.original_wording,
+                    provenance: format!(
+                        "Owner-recorded food diary ({})",
+                        food.snapshot.nutrition_confidence
+                    ),
+                    facts,
+                }
+            }
         })
         .collect();
 
@@ -190,6 +253,9 @@ pub fn build_timeline(entries: Vec<TimelineEntry>, cases: &[CaseDetail]) -> Vec<
             let mut facts = vec![fact("Investigation", &case.investigation.title)];
             if let Some(event_id) = update.linked_event_id {
                 facts.push(fact("Linked record", format!("Health event #{event_id}")));
+            }
+            if let Some(food_id) = update.linked_food_entry_id {
+                facts.push(fact("Linked feeding", format!("Food entry #{food_id}")));
             }
             items.push(ShareTimelineItem {
                 anchor: format!("case-{}-update-{}", case.investigation.id, update.id),

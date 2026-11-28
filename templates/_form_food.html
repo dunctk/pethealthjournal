@@ -1,0 +1,52 @@
+<form method="post" action="/food/entries" class="tracker-form food-dialog-form">
+  <input type="hidden" name="pet_id" value="{{ pet.id }}">
+  <input type="hidden" name="redirect_to_tab" value="1">
+  {% if !foods.is_empty() %}
+  <label class="full-width">Saved food (optional)
+    <select name="food_item_id">
+      <option value="">— Type a food name below —</option>
+      {% for f in foods %}<option value="{{ f.id }}">{{ f.display_name() }} ({{ f.basis_summary() }})</option>{% endfor %}
+    </select>
+  </label>
+  {% endif %}
+  <label class="full-width">Food name (if not chosen above)
+    <input maxlength="140" name="food_name" placeholder="e.g. Royal Canin Renal pouch, cooked chicken">
+  </label>
+  <label>Status
+    <select name="intake_status">
+      <option value="consumed_all">Ate all</option>
+      <option value="consumed_partial">Ate part</option>
+      <option value="refused">Refused</option>
+      <option value="consumed_unknown_amount">Ate (unknown amount)</option>
+      <option value="not_offered">Not offered</option>
+    </select>
+  </label>
+  <label>Appetite
+    <select name="appetite">
+      <option value="">— optional —</option>
+      <option value="eager">Eager</option>
+      <option value="normal">Normal</option>
+      <option value="reduced">Reduced</option>
+      <option value="picky">Picky</option>
+      <option value="refused">Refused</option>
+      <option value="unknown">Unknown</option>
+    </select>
+  </label>
+  <label>Consumed amount <span class="field-hint">optional</span>
+    <input type="number" min="0" step="0.01" name="consumed_amount" placeholder="e.g. 0.5 or 25">
+  </label>
+  <label>Unit
+    <input maxlength="40" name="consumed_unit" placeholder="g, pouch, tube, tsp, serving">
+  </label>
+  <label>Date
+    <input type="date" name="fed_on" value="{{ today }}">
+  </label>
+  <label>Meal <span class="field-hint">optional</span>
+    <input maxlength="40" name="meal_label" placeholder="breakfast, dinner, snack">
+  </label>
+  <label class="full-width food-check"><input type="checkbox" name="is_approximate" value="1"> Approximate quantity</label>
+  <label class="full-width">Original wording / note
+    <input maxlength="2000" name="original_wording" placeholder="e.g. Milo ate half a pouch of renal food this morning">
+  </label>
+  <button class="button primary full-width" type="submit">Save feeding entry</button>
+</form>
