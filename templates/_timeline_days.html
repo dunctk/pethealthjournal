@@ -67,6 +67,20 @@
   </div>
 </article>
 
+{% when TimelineEntry::Food with (food) %}
+<article class="event-row" data-kind="food">
+  <div class="event-rail"><span class="event-icon {% if food.intake_status == "refused" %}warning{% else %}active{% endif %}">◉</span><i></i></div>
+  <div class="event-body">
+    <div class="event-meta">
+      <span class="type {% if food.intake_status == "refused" %}warning{% else %}active{% endif %}">food · {{ food.intake_status_label() }}</span>
+      <time>{{ food.fed_on }}{% match food.meal_label %}{% when Some with (meal) %} · {{ meal }}{% when None %}{% endmatch %}</time>
+    </div>
+    <h3>{{ food.display_food_name() }} · {{ food.amount_label() }}</h3>
+    <p>“{{ food.original_wording }}”</p>
+    <small>{{ food.kcal_label() }}{% match food.appetite %}{% when Some with (app) %} · Appetite: {{ app }}{% when None %}{% endmatch %}</small>
+  </div>
+</article>
+
 {% endmatch %}
 {% endfor %}
 {% endfor %}

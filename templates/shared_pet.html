@@ -30,6 +30,7 @@
   <nav class="vet-jump-nav" aria-label="Veterinary record sections">
     <a href="#investigations">Investigations <small>{{ cases.len() }}</small></a>
     <a href="#clinical-timeline">Timeline <small>{{ timeline.len() }}</small></a>
+    <a href="#nutrition">Nutrition <small>{{ nutrition.window_30d.total_entries }}</small></a>
     <a href="#blood-markers">Blood markers <small>{{ charts.len() }}</small></a>
     <a href="#prescriptions">Prescriptions</a>
   </nav>
@@ -98,6 +99,52 @@
       </details>
       {% endfor %}
     </div>
+  </section>
+
+  <section class="vet-panel" id="nutrition">
+    <div class="section-head">
+      <div><span class="eyebrow">LONGITUDINAL NUTRITION</span><h2>Food &amp; appetite summary (30 days)</h2></div>
+    </div>
+    <p class="vet-help">{{ nutrition.clinical_note }}</p>
+    {% if nutrition.window_30d.total_entries == 0 %}
+    <p class="vet-empty">No feeding diary entries recorded in the last 30 days. Unlogged days are not interpreted as fasting.</p>
+    {% else %}
+    <dl class="vet-facts">
+      <div><dt>7-day coverage</dt><dd>{{ nutrition.window_7d.days_with_entries }} of 7 days logged · {% match nutrition.window_7d.avg_kcal_per_computable_day %}{% when Some with (v) %}{{ v }} kcal/logged day avg{% when None %}kcal unavailable{% endmatch %} · {{ nutrition.window_7d.refused_entries }} refusal(s)</dd></div>
+      <div><dt>30-day coverage</dt><dd>{{ nutrition.window_30d.days_with_entries }} of 30 days logged ({{ nutrition.window_30d.days_with_complete_kcal }} complete, {{ nutrition.window_30d.days_with_partial_kcal }} partial subtotal, {{ nutrition.window_30d.days_with_no_entries }} unlogged) · {% match nutrition.window_30d.avg_kcal_per_computable_day %}{% when Some with (v) %}{{ v }} kcal/logged day avg{% when None %}kcal unavailable{% endmatch %}</dd></div>
+      <div><dt>Recorded nutrient averages (logged days with data)</dt><dd>Protein: {% match nutrition.window_30d.avg_protein_g_per_logged_day %}{% when Some with (v) %}{{ v }} g{% when None %}—{% endmatch %} · Fat: {% match nutrition.window_30d.avg_fat_g_per_logged_day %}{% when Some with (v) %}{{ v }} g{% when None %}—{% endmatch %} · Phosphorus: {% match nutrition.window_30d.avg_phosphorus_mg_per_logged_day %}{% when Some with (v) %}{{ v }} mg{% when None %}—{% endmatch %} · Sodium: {% match nutrition.window_30d.avg_sodium_mg_per_logged_day %}{% when Some with (v) %}{{ v }} mg{% when None %}—{% endmatch %}</dd></div>
+      {% match nutrition.active_target %}{% when Some with (t) %}<div><dt>Owner/vet-entered target</dt><dd>{% match t.kcal_range_label() %}{% when Some with (lbl) %}{{ lbl }} · {% when None %}{% endmatch %}{{ t.source_note }} ({% if t.source == "owner_relayed_vet" %}owner-relayed vet target{% else %}owner-entered{% endif %})</dd></div>{% when None %}{% endmatch %}
+    </dl>
+    {% if nutrition_chart.has_data %}
+    <svg class="vet-chart" viewBox="0 0 600 218" role="img" aria-label="Weight versus recorded daily calories over 30 days" xmlns="http://www.w3.org/2000/svg">
+      <line x1="48" y1="24" x2="48" y2="172" stroke="currentColor" opacity=".3"/>
+      <line x1="48" y1="172" x2="552" y2="172" stroke="currentColor" opacity=".3"/>
+      {% if !nutrition_chart.kcal_max_label.is_empty() %}<text x="44" y="28" text-anchor="end" fill="currentColor" font-size="11">{{ nutrition_chart.kcal_max_label }}</text>{% endif %}
+      {% if !nutrition_chart.weight_max_label.is_empty() %}<text x="556" y="28" text-anchor="start" fill="#55aef3" font-size="11">{{ nutrition_chart.weight_max_label }}</text><text x="556" y="172" text-anchor="start" fill="#55aef3" font-size="11">{{ nutrition_chart.weight_min_label }}</text>{% endif %}
+      {% match nutrition_chart.target_min_y %}{% when Some with (ty) %}<line x1="48" y1="{{ ty }}" x2="552" y2="{{ ty }}" stroke="#ffcd4a" opacity=".45" stroke-dasharray="4 4"/>{% when None %}{% endmatch %}
+      {% match nutrition_chart.target_max_y %}{% when Some with (ty) %}<line x1="48" y1="{{ ty }}" x2="552" y2="{{ ty }}" stroke="#ffcd4a" opacity=".45" stroke-dasharray="4 4"/>{% when None %}{% endmatch %}
+      {% for bar in nutrition_chart.bars %}
+      <rect x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.width }}" height="{{ bar.height }}" rx="2" {% if bar.is_partial %}fill="rgba(255,205,74,0.28)" stroke="#ffcd4a" stroke-width="1.2"{% else %}fill="#42b983"{% endif %}><title>{{ bar.tooltip }}</title></rect>
+      {% endfor %}
+      {% if nutrition_chart.show_weight_line %}<polyline points="{{ nutrition_chart.weight_line }}" fill="none" stroke="#55aef3" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>{% endif %}
+      {% for wp in nutrition_chart.weight_points %}
+      <circle cx="{{ wp.x }}" cy="{{ wp.y }}" r="4.5" fill="#55aef3" stroke="#0b2940" stroke-width="1.5"><title>{{ wp.tooltip }}</title></circle>
+      {% endfor %}
+      <text x="48" y="198" text-anchor="start" fill="currentColor" font-size="11">{{ nutrition_chart.start_label }}</text>
+      <text x="552" y="198" text-anchor="end" fill="currentColor" font-size="11">{{ nutrition_chart.end_label }}</text>
+    </svg>
+    <p class="vet-muted">Green bars = complete logged kcal; amber outlined bars = partial subtotal (some items lacked nutrition/quantity); blank days = no entries logged (not fasting); blue line = recorded body weight.</p>
+    {% endif %}
+    {% if !nutrition.food_acceptance.is_empty() %}
+    <div class="vet-table-scroll"><table class="vet-marker-table">
+      <caption>Foods offered in the last 30 days and acceptance/refusal counts</caption>
+      <thead><tr><th scope="col">Food</th><th scope="col">Offered</th><th scope="col">Ate all</th><th scope="col">Partial</th><th scope="col">Refused</th><th scope="col">Unknown qty</th><th scope="col">Acceptance</th></tr></thead>
+      <tbody>{% for item in nutrition.food_acceptance %}
+      <tr><td>{{ item.food_name }}</td><td>{{ item.times_offered }}</td><td>{{ item.consumed_all }}</td><td>{{ item.consumed_partial }}</td><td>{{ item.refused }}</td><td>{{ item.consumed_unknown_amount }}</td><td>{% match item.acceptance_rate_pct %}{% when Some with (pct) %}{{ pct }}%{% when None %}—{% endmatch %}</td></tr>
+      {% endfor %}</tbody>
+    </table></div>
+    {% endif %}
+    {% endif %}
   </section>
 
   <section class="vet-panel" id="blood-markers">

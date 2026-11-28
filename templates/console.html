@@ -58,6 +58,7 @@
         <details class="record-menu">
           <summary aria-label="Record a structured entry"><span aria-hidden="true">+</span> Record</summary>
           <div class="record-popover floating-material" role="menu">
+            <button type="button" role="menuitem" data-open-record-dialog hx-get="/app/forms/food?pet={{ pet.id }}" hx-target="#record-dialog-slot" hx-swap="innerHTML">Food / meal</button>
             <button type="button" role="menuitem" data-open-record-dialog hx-get="/app/forms/weight?pet={{ pet.id }}" hx-target="#record-dialog-slot" hx-swap="innerHTML">Weight</button>
             <button type="button" role="menuitem" data-open-record-dialog hx-get="/app/forms/dose?pet={{ pet.id }}" hx-target="#record-dialog-slot" hx-swap="innerHTML">Dose</button>
             <button type="button" role="menuitem" data-open-record-dialog hx-get="/app/forms/lab?pet={{ pet.id }}" hx-target="#record-dialog-slot" hx-swap="innerHTML">Lab</button>
@@ -88,6 +89,7 @@
       </section>
       <nav class="tab-bar" aria-label="Pet record sections">
         <a class="tab-link {% if view.is_timeline() %}active{% endif %}" {% if view.is_timeline() %}aria-current="page"{% endif %} href="/app?pet={{ pet.id }}&amp;view=timeline" hx-get="/app/tab/timeline?pet={{ pet.id }}" hx-target="#tab-body" hx-swap="innerHTML" hx-push-url="/app?pet={{ pet.id }}&amp;view=timeline">Timeline</a>
+        <a class="tab-link {% if view.is_food() %}active{% endif %}" {% if view.is_food() %}aria-current="page"{% endif %} href="/app?pet={{ pet.id }}&amp;view=food" hx-get="/app/tab/food?pet={{ pet.id }}" hx-target="#tab-body" hx-swap="innerHTML" hx-push-url="/app?pet={{ pet.id }}&amp;view=food">Food</a>
         <a class="tab-link {% if view.is_plan() %}active{% endif %}" {% if view.is_plan() %}aria-current="page"{% endif %} href="/app?pet={{ pet.id }}&amp;view=plan" hx-get="/app/tab/plan?pet={{ pet.id }}" hx-target="#tab-body" hx-swap="innerHTML" hx-push-url="/app?pet={{ pet.id }}&amp;view=plan">Plan</a>
         <a class="tab-link {% if view.is_labs() %}active{% endif %}" {% if view.is_labs() %}aria-current="page"{% endif %} href="/app?pet={{ pet.id }}&amp;view=labs" hx-get="/app/tab/labs?pet={{ pet.id }}" hx-target="#tab-body" hx-swap="innerHTML" hx-push-url="/app?pet={{ pet.id }}&amp;view=labs">Labs</a>
         <a class="tab-link {% if view.is_photos() %}active{% endif %}" {% if view.is_photos() %}aria-current="page"{% endif %} href="/app?pet={{ pet.id }}&amp;view=photos" hx-get="/app/tab/photos?pet={{ pet.id }}" hx-target="#tab-body" hx-swap="innerHTML" hx-push-url="/app?pet={{ pet.id }}&amp;view=photos">Photos</a>

@@ -14,6 +14,14 @@ The application also creates expiring, revocable, read-only vet links. Share tok
 
 Track unresolved problems across symptoms, treatments, responses, vet findings and open questions without conflating hypotheses with diagnoses. Open Clinical investigations on the pet dashboard or use MCP tools such as open_clinical_case, add_clinical_case_update, add_clinical_hypothesis and get_vet_case_brief. Existing expiring, revocable vet-share pages include case summaries. See [documentation](docs/clinical-investigations.md).
 
+## Food & nutrition diary
+
+Each pet has a **Food** tab and a household-scoped reusable food catalogue for logging commercial wet/dry diets, veterinary prescription diets, treats, supplements, plain human foods, and custom preparations without a separate calorie-counting app or paid nutrition API.
+
+- **MCP-first conversational capture:** Assistants reuse household foods via `list_foods` / `add_food` / `update_food`, log multi-item meals atomically with retry-safe `record_food_intake`, correct or undo entries with `update_food_intake` / `delete_food_intake`, and retrieve coverage-aware summaries and clinical alignment via `get_food_diary_summary` and `get_nutrition_trends` (plus optional owner/vet targets via `set_nutrition_target`). No server-side LLM call runs on food writes or calculations.
+- **Deterministic & clinically safe math:** Supports `per_100g`, `per_100ml`, `per_serving`, and `dry_matter` bases without silently mixing incompatible units or assuming universal serving weights. Catalogue updates preserve historical diary snapshots. Unknown quantities never count as `0 kcal`, unlogged days are never interpreted as fasting, and incomplete days are explicitly marked as partial subtotals.
+- **Web & veterinary integration:** Includes quick one-tap frequent-food and refusal logging, historical date navigation, inline edits and undo/restore, 7-day and 30-day trends, a Weight vs. Recorded Daily Calories chart, timeline integration, linked evidence in clinical investigations, and a read-only nutrition section on expiring vet-share links. See [Food & nutrition diary](docs/food-nutrition-diary.md).
+
 ## Medication history and owner-reviewed reconciliation
 
 The active prescription list is **not** inferred from health notes. When an owner reports that the current medicines differ from the structured plan, MCP clients should call `review_medication_plan` with the owner-confirmed medicine names. It compares exact names and returns **possible** stale active prescriptions and missing current medicines. The tool is read-only; name variants, dose and timing must still be reviewed. To apply a change, call `update_prescription` for each prescription after explicit owner approval.

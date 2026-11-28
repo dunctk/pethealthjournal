@@ -726,7 +726,7 @@ async fn handle(
                 "protocolVersion": negotiated,
                 "capabilities":{"tools":{"listChanged":false}},
                 "serverInfo":{"name":"pethealth","version":env!("CARGO_PKG_VERSION")},
-                "instructions":"Pet Health Journal is a longitudinal pet health record. You (the assistant) interpret the owner's words and call structured tools; the server timestamps and preserves the original wording. Prefer record_observation or a typed record_* tool over record_health_event to avoid a second model call. Never diagnose, prescribe, or promise emergency monitoring. Findings from get_health_insights describe measured change only. First run: if list_pets returns no pets, the owner is new; ask for their pet's name and species (breed and birth date are optional), then call add_pet before recording anything."
+                "instructions":"Pet Health Journal is a longitudinal pet health record. You (the assistant) interpret the owner's words and call structured tools; the server timestamps and preserves the original wording. Prefer record_observation or a typed record_* tool over record_health_event to avoid a second model call. For food and nutrition: check list_foods before adding duplicates, use add_food to save reusable foods with explicit nutrition_basis/nutrition_source/nutrition_confidence (never fabricate nutrient values), and record meals atomically with record_food_intake even when nutrition is unknown. Never equate unknown intake or unlogged days with fasting/zero, never prescribe calorie/nutrient targets automatically, and clearly distinguish chronological association from causation. Never diagnose, prescribe, or promise emergency monitoring. Findings from get_health_insights describe measured change only. First run: if list_pets returns no pets, the owner is new; ask for their pet's name and species (breed and birth date are optional), then call add_pet before recording anything."
             }))
         }
         "notifications/initialized" => Ok(Value::Null),
@@ -783,8 +783,252 @@ fn tool_list() -> Value {
     let mut list = core_tool_list();
     if let Some(tools) = list.get_mut("tools").and_then(Value::as_array_mut) {
         tools.extend(lab_edit_tools());
+        tools.extend(food_diary_tools());
     }
     list
+}
+
+fn food_diary_tools() -> Vec<Value> {
+    let intake_item_schema = json!({
+        "type": "object",
+        "properties": {
+            "food_item_id": {"type": "integer", "description": "Existing household catalogue food id from list_foods. Prefer reusing catalogue foods."},
+            "food_name": {"type": "string", "maxLength": 140, "description": "Ad-hoc food name when food_item_id is omitted."},
+            "brand": {"type": "string", "maxLength": 100},
+            "variant": {"type": "string", "maxLength": 120},
+            "category": {"type": "string", "enum": ["commercial_wet","commercial_dry","prescription_diet","treat","supplement","human_food","custom_prep"]},
+            "completeness": {"type": "string", "enum": ["complete","complementary","unknown"]},
+            "intake_status": {"type": "string", "enum": ["consumed_all","consumed_partial","refused","consumed_unknown_amount","not_offered"], "description": "Distinguish refused (0 eaten), unknown amount (NOT 0), partial, full consumption, or not offered."},
+            "appetite": {"type": "string", "enum": ["eager","normal","reduced","picky","refused","unknown"]},
+            "offered_amount": {"type": "number", "minimum": 0},
+            "offered_unit": {"type": "string", "maxLength": 40, "description": "e.g. g, oz, ml, tsp, tbsp, pouch, can, tube, scoop, serving."},
+            "consumed_amount": {"type": "number", "minimum": 0, "description": "Omit if unknown; never fabricate grams. For consumed_all with offered_amount, defaults to offered_amount."},
+            "consumed_unit": {"type": "string", "maxLength": 40},
+            "is_approximate": {"type": "boolean", "default": false, "description": "True when the owner gave an estimate (e.g. 'about 25g', 'roughly half a pouch')."},
+            "preparation": {"type": "string", "maxLength": 200, "description": "Optional preparation detail, e.g. 'warmed', 'boiled plain', 'hand-fed'."},
+            "original_wording": {"type": "string", "maxLength": 2000, "description": "Optional per-item original owner wording; falls back to top-level original_wording."},
+            "notes": {"type": "string", "maxLength": 1000},
+            "serving_size_value": {"type": "number", "exclusiveMinimum": 0},
+            "serving_size_unit": {"type": "string", "maxLength": 30},
+            "serving_label": {"type": "string", "maxLength": 40},
+            "nutrition_basis": {"type": "string", "enum": ["per_100g","per_100ml","per_serving","dry_matter"]},
+            "kcal_per_basis": {"type": "number", "minimum": 0},
+            "protein_g": {"type": "number", "minimum": 0},
+            "fat_g": {"type": "number", "minimum": 0},
+            "phosphorus_mg": {"type": "number", "minimum": 0},
+            "sodium_mg": {"type": "number", "minimum": 0},
+            "moisture_pct": {"type": "number", "minimum": 0, "maximum": 100},
+            "nutrition_confidence": {"type": "string", "enum": ["verified","estimated","unknown"]},
+            "nutrition_source": {"type": "string", "maxLength": 500}
+        },
+        "required": ["intake_status"]
+    });
+    vec![
+        json!({
+            "name": "list_foods",
+            "description": "Search or list reusable foods in the signed-in household's food catalogue (commercial wet/dry, prescription diets, treats, supplements, human foods, custom preps). Check this before add_food to reuse existing items.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "maxLength": 120, "description": "Optional substring match on name, brand, or variant."},
+                    "category": {"type": "string", "enum": ["commercial_wet","commercial_dry","prescription_diet","treat","supplement","human_food","custom_prep"]},
+                    "favorites_only": {"type": "boolean", "default": false},
+                    "include_archived": {"type": "boolean", "default": false},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}
+                }
+            },
+            "annotations": {"readOnlyHint": true}
+        }),
+        json!({
+            "name": "add_food",
+            "description": "Add a reusable food item to the household food catalogue. Populate sourced nutritional information from manufacturer labels, packaging photos, reputable databases (e.g. USDA), owner or vet notes when available. Always specify nutrition_basis when setting kcal/nutrients and record nutrition_source and nutrition_confidence (verified/estimated/unknown). Never fabricate missing nutrient values.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "maxLength": 140},
+                    "brand": {"type": "string", "maxLength": 100},
+                    "variant": {"type": "string", "maxLength": 120},
+                    "category": {"type": "string", "enum": ["commercial_wet","commercial_dry","prescription_diet","treat","supplement","human_food","custom_prep"], "default": "commercial_wet"},
+                    "food_form": {"type": "string", "maxLength": 60, "description": "e.g. pouch, pate, kibble, tube, cooked"},
+                    "completeness": {"type": "string", "enum": ["complete","complementary","unknown"], "default": "unknown"},
+                    "serving_size_value": {"type": "number", "exclusiveMinimum": 0, "description": "Weight or volume of one serving, e.g. 85 for an 85g pouch."},
+                    "serving_size_unit": {"type": "string", "maxLength": 30, "description": "g or ml."},
+                    "serving_label": {"type": "string", "maxLength": 40, "description": "e.g. pouch, can, tube, scoop, serving."},
+                    "nutrition_basis": {"type": "string", "enum": ["per_100g","per_100ml","per_serving","dry_matter"], "description": "Required when supplying kcal or nutrient values. Never mix bases."},
+                    "kcal_per_basis": {"type": "number", "minimum": 0},
+                    "protein_g": {"type": "number", "minimum": 0, "description": "Grams per basis (for per_100g/dry_matter this equals %)."},
+                    "fat_g": {"type": "number", "minimum": 0},
+                    "phosphorus_mg": {"type": "number", "minimum": 0, "description": "Milligrams per basis (note: 0.1% per 100g = 100 mg)."},
+                    "sodium_mg": {"type": "number", "minimum": 0, "description": "Milligrams per basis."},
+                    "moisture_pct": {"type": "number", "minimum": 0, "maximum": 100},
+                    "nutrition_confidence": {"type": "string", "enum": ["verified","estimated","unknown"], "default": "unknown"},
+                    "nutrition_source": {"type": "string", "maxLength": 500, "description": "Where the nutrition data came from (e.g. product label, USDA FoodData Central, vet)."},
+                    "notes": {"type": "string", "maxLength": 1000},
+                    "is_favorite": {"type": "boolean", "default": false}
+                },
+                "required": ["name"]
+            }
+        }),
+        json!({
+            "name": "update_food",
+            "description": "Update an existing household food catalogue item (nutrition, serving size, favourite flag, or archive). Historical food diary entries keep their original nutrition snapshots and are never silently rewritten.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "food_id": {"type": "integer"},
+                    "name": {"type": "string", "maxLength": 140},
+                    "brand": {"type": "string", "maxLength": 100},
+                    "variant": {"type": "string", "maxLength": 120},
+                    "category": {"type": "string", "enum": ["commercial_wet","commercial_dry","prescription_diet","treat","supplement","human_food","custom_prep"]},
+                    "food_form": {"type": "string", "maxLength": 60},
+                    "completeness": {"type": "string", "enum": ["complete","complementary","unknown"]},
+                    "serving_size_value": {"type": "number", "exclusiveMinimum": 0},
+                    "serving_size_unit": {"type": "string", "maxLength": 30},
+                    "serving_label": {"type": "string", "maxLength": 40},
+                    "nutrition_basis": {"type": "string", "enum": ["per_100g","per_100ml","per_serving","dry_matter"]},
+                    "kcal_per_basis": {"type": "number", "minimum": 0},
+                    "protein_g": {"type": "number", "minimum": 0},
+                    "fat_g": {"type": "number", "minimum": 0},
+                    "phosphorus_mg": {"type": "number", "minimum": 0},
+                    "sodium_mg": {"type": "number", "minimum": 0},
+                    "moisture_pct": {"type": "number", "minimum": 0, "maximum": 100},
+                    "nutrition_confidence": {"type": "string", "enum": ["verified","estimated","unknown"]},
+                    "nutrition_source": {"type": "string", "maxLength": 500},
+                    "notes": {"type": "string", "maxLength": 1000},
+                    "is_favorite": {"type": "boolean"},
+                    "archived": {"type": "boolean"}
+                },
+                "required": ["food_id"]
+            }
+        }),
+        json!({
+            "name": "record_food_intake",
+            "description": "Record one or multiple foods offered/eaten in a meal atomically for one pet (no backend LLM call). Supports catalogue reuse via food_item_id, partial servings, refusals, approximate quantities, unknown amounts, and foods without nutritional info. Preserves original_wording and nutrition snapshots. Supply idempotency_key to prevent duplicates on retry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pet_id": {"type": "integer"},
+                    "fed_on": {"type": "string", "description": "Calendar day YYYY-MM-DD (defaults to today UTC, or derived from days_ago/minutes_ago)."},
+                    "days_ago": {"type": "integer", "minimum": 0, "maximum": 3650},
+                    "minutes_ago": {"type": "integer", "minimum": 0, "maximum": 525600},
+                    "fed_time_precision": {"type": "string", "enum": ["exact","approximate_time","date_only","recorded"]},
+                    "meal_label": {"type": "string", "maxLength": 40, "description": "e.g. breakfast, lunch, dinner, snack, morning, evening."},
+                    "original_wording": {"type": "string", "minLength": 1, "maxLength": 2000, "description": "The owner's exact words; preserved verbatim."},
+                    "idempotency_key": {"type": "string", "maxLength": 120, "description": "Optional client retry key to prevent duplicate meal entries."},
+                    "items": {"type": "array", "minItems": 1, "maxItems": 25, "items": intake_item_schema, "description": "One or more foods in this meal, written atomically."}
+                },
+                "required": ["pet_id", "original_wording", "items"]
+            }
+        }),
+        json!({
+            "name": "list_food_intake",
+            "description": "List active food diary entries for one pet with optional date bounds (since/until YYYY-MM-DD), intake_status or food_item_id filters, and pagination.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pet_id": {"type": "integer"},
+                    "since": {"type": "string", "description": "Earliest fed_on date YYYY-MM-DD."},
+                    "until": {"type": "string", "description": "Latest fed_on date YYYY-MM-DD."},
+                    "intake_status": {"type": "string", "enum": ["consumed_all","consumed_partial","refused","consumed_unknown_amount","not_offered"]},
+                    "food_item_id": {"type": "integer"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 25},
+                    "offset": {"type": "integer", "minimum": 0, "default": 0}
+                },
+                "required": ["pet_id"]
+            },
+            "annotations": {"readOnlyHint": true}
+        }),
+        json!({
+            "name": "update_food_intake",
+            "description": "Correct an existing active food diary entry (quantity, unit, intake_status, appetite, date, wording, notes) and deterministically recompute its nutrition from its stored snapshot. Audited with before/after values.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "entry_id": {"type": "integer"},
+                    "intake_status": {"type": "string", "enum": ["consumed_all","consumed_partial","refused","consumed_unknown_amount","not_offered"]},
+                    "appetite": {"type": "string", "enum": ["eager","normal","reduced","picky","refused","unknown"]},
+                    "offered_amount": {"type": "number", "minimum": 0},
+                    "offered_unit": {"type": "string", "maxLength": 40},
+                    "consumed_amount": {"type": "number", "minimum": 0},
+                    "consumed_unit": {"type": "string", "maxLength": 40},
+                    "is_approximate": {"type": "boolean"},
+                    "fed_on": {"type": "string", "description": "YYYY-MM-DD"},
+                    "meal_label": {"type": "string", "maxLength": 40},
+                    "preparation": {"type": "string", "maxLength": 200},
+                    "original_wording": {"type": "string", "minLength": 1, "maxLength": 2000},
+                    "notes": {"type": "string", "maxLength": 1000}
+                },
+                "required": ["entry_id"]
+            },
+            "annotations": {"destructiveHint": true}
+        }),
+        json!({
+            "name": "delete_food_intake",
+            "description": "Soft-delete (undo) one mistaken food diary entry. Only call when the owner asks to remove or undo an entry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "entry_id": {"type": "integer"}
+                },
+                "required": ["entry_id"]
+            },
+            "annotations": {"destructiveHint": true}
+        }),
+        json!({
+            "name": "get_food_diary_summary",
+            "description": "Get a concise deterministic daily (or date-range) nutrition summary for one pet without loading the full diary: recorded calories (split verified vs estimated), optional protein/fat/phosphorus/sodium totals, data completeness/coverage flags, refusals, appetite counts, and comparison against any owner/vet-entered target.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pet_id": {"type": "integer"},
+                    "date": {"type": "string", "description": "Single calendar day YYYY-MM-DD (defaults to today UTC when since/until are omitted)."},
+                    "since": {"type": "string", "description": "Start of range YYYY-MM-DD (max 90 days)."},
+                    "until": {"type": "string", "description": "End of range YYYY-MM-DD."}
+                },
+                "required": ["pet_id"]
+            },
+            "annotations": {"readOnlyHint": true}
+        }),
+        json!({
+            "name": "get_nutrition_trends",
+            "description": "Get 7-day, 30-day, and custom-window deterministic nutrition trends for one pet: rolling averages over logged days only (never treating unlogged days as fasting), coverage counts, food acceptance/refusal rates, active owner/vet target comparison, and optional chronologically aligned weights, medications, symptoms, and labs. Association is never causation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pet_id": {"type": "integer"},
+                    "days": {"type": "integer", "minimum": 1, "maximum": 90, "default": 30},
+                    "since": {"type": "string", "description": "Optional start date YYYY-MM-DD."},
+                    "until": {"type": "string", "description": "Optional end date YYYY-MM-DD (defaults to today UTC)."},
+                    "include_clinical_context": {"type": "boolean", "default": true, "description": "Include chronologically aligned weight, prescription, symptom, and lab records for comparison."}
+                },
+                "required": ["pet_id"]
+            },
+            "annotations": {"readOnlyHint": true}
+        }),
+        json!({
+            "name": "set_nutrition_target",
+            "description": "Save or clear an explicit owner- or veterinarian-established daily calorie/nutrient target for one pet, with provenance. NEVER auto-prescribe targets; only call when the owner states a target they or their veterinarian chose.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pet_id": {"type": "integer"},
+                    "daily_kcal_min": {"type": "number", "exclusiveMinimum": 0},
+                    "daily_kcal_max": {"type": "number", "exclusiveMinimum": 0},
+                    "daily_protein_g_min": {"type": "number", "minimum": 0},
+                    "daily_protein_g_max": {"type": "number", "minimum": 0},
+                    "daily_fat_g_min": {"type": "number", "minimum": 0},
+                    "daily_fat_g_max": {"type": "number", "minimum": 0},
+                    "daily_phosphorus_mg_max": {"type": "number", "minimum": 0},
+                    "daily_sodium_mg_max": {"type": "number", "minimum": 0},
+                    "source": {"type": "string", "enum": ["owner_entered","owner_relayed_vet"]},
+                    "source_note": {"type": "string", "maxLength": 500, "description": "Who set this target and when, e.g. 'Dr Smith renal consult 2026-11-10'."},
+                    "effective_from": {"type": "string", "description": "Optional YYYY-MM-DD."},
+                    "clear": {"type": "boolean", "default": false, "description": "Set true to clear the pet's active target."}
+                },
+                "required": ["pet_id"]
+            }
+        }),
+    ]
 }
 
 /// Tools for correcting stored blood tests. Each previews by default and
@@ -818,7 +1062,7 @@ fn core_tool_list() -> Value {
         {"name":"list_clinical_cases","description":"List persistent clinical investigations for one pet. These organize unresolved problems, not diagnoses.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"}},"required":["pet_id"]},"annotations":{"readOnlyHint":true}},
         {"name":"get_clinical_case","description":"Read the owner's dated notes, vet-reported findings, treatment responses, uncertainties and differential questions in one investigation. Vet attribution is owner-relayed unless directly verified.","inputSchema":{"type":"object","properties":{"case_id":{"type":"integer"}},"required":["case_id"]},"annotations":{"readOnlyHint":true}},
         {"name":"open_clinical_case","description":"Start an unresolved clinical investigation for a pet using the owner's original presenting concern. Do not supply an AI diagnosis.","inputSchema":{"type":"object","properties":{"pet_id":{"type":"integer"},"title":{"type":"string","maxLength":120},"presenting_concern":{"type":"string","maxLength":2000}},"required":["pet_id","title","presenting_concern"]}},
-        {"name":"add_clinical_case_update","description":"Append a dated owner observation, medication course, response, vet-reported finding, test or question. Use exact wording, never invent dates or claim independent vet authentication. Optionally link an existing active health event from the same pet.","inputSchema":{"type":"object","properties":{"case_id":{"type":"integer"},"kind":{"type":"string","enum":["observation","treatment","response","vet_finding","test","question"]},"original_wording":{"type":"string","maxLength":3000},"observed_on":{"type":"string","description":"Known observation date YYYY-MM-DD. Omit rather than guessing."},"source":{"type":"string","enum":["owner_reported","owner_relayed_vet"],"default":"owner_reported"},"linked_event_id":{"type":"integer"}},"required":["case_id","kind","original_wording"]}},
+        {"name":"add_clinical_case_update","description":"Append a dated owner observation, medication course, response, vet-reported finding, test or question. Use exact wording, never invent dates or claim independent vet authentication. Optionally link an existing active health event or food diary entry from the same pet.","inputSchema":{"type":"object","properties":{"case_id":{"type":"integer"},"kind":{"type":"string","enum":["observation","treatment","response","vet_finding","test","question"]},"original_wording":{"type":"string","maxLength":3000},"observed_on":{"type":"string","description":"Known observation date YYYY-MM-DD. Omit rather than guessing."},"source":{"type":"string","enum":["owner_reported","owner_relayed_vet"],"default":"owner_reported"},"linked_event_id":{"type":"integer"},"linked_food_entry_id":{"type":"integer","description":"Optional active food diary entry id from list_food_intake for this pet."}},"required":["case_id","kind","original_wording"]}},
         {"name":"add_clinical_hypothesis","description":"Store an explicitly UNREVIEWED possible explanation or question for the veterinarian. Do not present it as a diagnosis. reported_by says where the idea came from.","inputSchema":{"type":"object","properties":{"case_id":{"type":"integer"},"label":{"type":"string","maxLength":200},"rationale":{"type":"string","maxLength":2000},"reported_by":{"type":"string","enum":["owner_question","owner_relayed_vet"],"default":"owner_question"}},"required":["case_id","label"]}},
         {"name":"review_clinical_hypothesis","description":"Update hypothesis review status only with owner's explicit approval. 'ruled_out' or 'vet_supported' require the owner to relay a specific veterinary assessment; this is NOT independently verified.","inputSchema":{"type":"object","properties":{"case_id":{"type":"integer"},"hypothesis_id":{"type":"integer"},"status":{"type":"string","enum":["unreviewed","under_review","less_likely","ruled_out","vet_supported"]},"rationale":{"type":"string","maxLength":2000},"reported_by":{"type":"string","enum":["owner_question","owner_relayed_vet"]},"confirm":{"type":"boolean"}},"required":["case_id","hypothesis_id","status","rationale","reported_by","confirm"]},"annotations":{"destructiveHint":true}},
         {"name":"set_clinical_case_status","description":"Mark a clinical investigation open, monitoring or resolved, only with owner's explicit approval. Do not equate 'resolved' with a diagnosis.","inputSchema":{"type":"object","properties":{"case_id":{"type":"integer"},"status":{"type":"string","enum":["open","monitoring","resolved"]},"confirm":{"type":"boolean"}},"required":["case_id","status","confirm"]},"annotations":{"destructiveHint":true}},
@@ -1097,6 +1341,7 @@ async fn call_tool(
                     .and_then(Value::as_str)
                     .unwrap_or("owner_reported"),
                 args.get("linked_event_id").and_then(Value::as_i64),
+                args.get("linked_food_entry_id").and_then(Value::as_i64),
             )
             .await
             .map_err(|e| (-32602, e.to_string()))?;
@@ -1170,12 +1415,29 @@ async fn call_tool(
                 .map_err(internal)?
                 .ok_or((-32602, "Investigation not found.".into()))?;
             let pet_id = detail.investigation.pet_id;
+            let today = Utc::now().date_naive();
+            let nutrition = crate::nutrition::load_trend_report(
+                &state.db,
+                user.household_id,
+                pet_id,
+                today - Duration::days(29),
+                today,
+            )
+            .await
+            .map_err(internal)?;
             json!({
                 "case":detail,
                 "prescriptions":db::list_prescriptions(&state.db,user.household_id,pet_id,30).await.map_err(internal)?,
                 "recent_events_may_be_unrelated":db::list_events(&state.db,user.household_id,Some(pet_id),40).await.map_err(internal)?,
                 "labs":db::list_lab_reports(&state.db,user.household_id,pet_id).await.map_err(internal)?,
-                "disclaimer":"Owner-maintained record. Possible explanations are unconfirmed; veterinary assessments are owner-relayed. No dosing recommendations."
+                "nutrition_summary_30d":{
+                    "window_7d": nutrition.window_7d,
+                    "window_30d": nutrition.window_30d,
+                    "food_acceptance": nutrition.food_acceptance,
+                    "active_target": nutrition.active_target,
+                    "clinical_note": nutrition.clinical_note
+                },
+                "disclaimer":"Owner-maintained record. Possible explanations are unconfirmed; veterinary assessments are owner-relayed. No dosing or dietary prescriptions."
             })
         }
         "get_clinical_timeline" => {
@@ -2375,9 +2637,623 @@ async fn call_tool(
         "undo_health_event" => {
             json!({"undone":db::undo_event(&state.db, user.household_id, &user.audit_actor(), integer(&args, "event_id")?).await.map_err(internal)?})
         }
-        _ => return Err((-32601, format!("Unknown tool: {name}"))),
+        other => match call_food_tool(state, user, other, &args).await {
+            Some(result) => result?,
+            None => return Err((-32601, format!("Unknown tool: {name}"))),
+        },
     };
     tool_result(value)
+}
+
+async fn call_food_tool(
+    state: &AppState,
+    user: &UserAccount,
+    name: &str,
+    args: &Value,
+) -> Option<Result<Value, (i32, String)>> {
+    let opt_f64 = |obj: &Value, key: &str| -> Result<Option<f64>, (i32, String)> {
+        match obj.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => v
+                .as_f64()
+                .filter(|n| n.is_finite())
+                .map(Some)
+                .ok_or((-32602, format!("{key} must be a finite number."))),
+        }
+    };
+    let patch_opt_str = |obj: &Value, key: &str| -> Option<Option<String>> {
+        obj.get(key).map(|v| {
+            v.as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned)
+        })
+    };
+    let patch_opt_f64 = |obj: &Value, key: &str| -> Result<Option<Option<f64>>, (i32, String)> {
+        match obj.get(key) {
+            None => Ok(None),
+            Some(Value::Null) => Ok(Some(None)),
+            Some(v) => v
+                .as_f64()
+                .filter(|n| n.is_finite())
+                .map(|n| Some(Some(n)))
+                .ok_or((-32602, format!("{key} must be a finite number or null."))),
+        }
+    };
+
+    let result = match name {
+        "list_foods" => async {
+            let items = crate::nutrition::list_foods(
+                &state.db,
+                user.household_id,
+                string_opt(args, "query"),
+                string_opt(args, "category"),
+                args.get("favorites_only")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                args.get("include_archived")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                args.get("limit").and_then(Value::as_u64).unwrap_or(50),
+            )
+            .await
+            .map_err(|e| (-32602, e.to_string()))?;
+            let count = items.len();
+            Ok(json!({"items": items, "count": count}))
+        }
+        .await,
+        "add_food" => async {
+            let input = crate::nutrition::NewFoodItem {
+                name: string(args, "name")?,
+                brand: string_opt(args, "brand").map(ToOwned::to_owned),
+                variant: string_opt(args, "variant").map(ToOwned::to_owned),
+                category: string_opt(args, "category")
+                    .unwrap_or("commercial_wet")
+                    .to_owned(),
+                food_form: string_opt(args, "food_form").map(ToOwned::to_owned),
+                completeness: string_opt(args, "completeness")
+                    .unwrap_or("unknown")
+                    .to_owned(),
+                serving_size_value: opt_f64(args, "serving_size_value")?,
+                serving_size_unit: string_opt(args, "serving_size_unit").map(ToOwned::to_owned),
+                serving_label: string_opt(args, "serving_label").map(ToOwned::to_owned),
+                nutrition_basis: string_opt(args, "nutrition_basis").map(ToOwned::to_owned),
+                kcal_per_basis: opt_f64(args, "kcal_per_basis")?,
+                protein_g: opt_f64(args, "protein_g")?,
+                fat_g: opt_f64(args, "fat_g")?,
+                phosphorus_mg: opt_f64(args, "phosphorus_mg")?,
+                sodium_mg: opt_f64(args, "sodium_mg")?,
+                moisture_pct: opt_f64(args, "moisture_pct")?,
+                nutrition_confidence: string_opt(args, "nutrition_confidence")
+                    .unwrap_or("")
+                    .to_owned(),
+                nutrition_source: string_opt(args, "nutrition_source").map(ToOwned::to_owned),
+                notes: string_opt(args, "notes").map(ToOwned::to_owned),
+                is_favorite: args
+                    .get("is_favorite")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            };
+            let food = crate::nutrition::create_food(
+                &state.db,
+                user.household_id,
+                &user.audit_actor(),
+                input,
+            )
+            .await
+            .map_err(|e| (-32602, e.to_string()))?;
+            Ok(json!({"food": food, "message": "Food added to household catalogue."}))
+        }
+        .await,
+        "update_food" => async {
+            let food_id = integer(args, "food_id")?;
+            let patch = crate::nutrition::FoodItemPatch {
+                name: args
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                brand: patch_opt_str(args, "brand"),
+                variant: patch_opt_str(args, "variant"),
+                category: args
+                    .get("category")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                food_form: patch_opt_str(args, "food_form"),
+                completeness: args
+                    .get("completeness")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                serving_size_value: patch_opt_f64(args, "serving_size_value")?,
+                serving_size_unit: patch_opt_str(args, "serving_size_unit"),
+                serving_label: patch_opt_str(args, "serving_label"),
+                nutrition_basis: patch_opt_str(args, "nutrition_basis"),
+                kcal_per_basis: patch_opt_f64(args, "kcal_per_basis")?,
+                protein_g: patch_opt_f64(args, "protein_g")?,
+                fat_g: patch_opt_f64(args, "fat_g")?,
+                phosphorus_mg: patch_opt_f64(args, "phosphorus_mg")?,
+                sodium_mg: patch_opt_f64(args, "sodium_mg")?,
+                moisture_pct: patch_opt_f64(args, "moisture_pct")?,
+                nutrition_confidence: args
+                    .get("nutrition_confidence")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                nutrition_source: patch_opt_str(args, "nutrition_source"),
+                notes: patch_opt_str(args, "notes"),
+                is_favorite: args.get("is_favorite").and_then(Value::as_bool),
+                archived: args.get("archived").and_then(Value::as_bool),
+            };
+            let food = crate::nutrition::update_food(
+                &state.db,
+                user.household_id,
+                &user.audit_actor(),
+                food_id,
+                patch,
+            )
+            .await
+            .map_err(|e| (-32602, e.to_string()))?
+            .ok_or((-32602, "Food item not found in this household.".into()))?;
+            Ok(json!({
+                "food": food,
+                "historical_snapshots_preserved": true,
+                "message": "Catalogue item updated; past diary snapshots were not altered."
+            }))
+        }
+        .await,
+        "record_food_intake" => async {
+            let pet_id = integer(args, "pet_id")?;
+            let top_wording = string(args, "original_wording")?;
+            let now = Utc::now();
+            let (fed_on, fed_at, default_precision) =
+                if let Some(raw_day) = string_opt(args, "fed_on") {
+                    (raw_day.to_owned(), None, "date_only")
+                } else if let Some(days) = args.get("days_ago").and_then(Value::as_i64) {
+                    if !(0..=3650).contains(&days) {
+                        return Err((-32602, "days_ago must be 0 to 3650.".into()));
+                    }
+                    (
+                        (now.date_naive() - Duration::days(days))
+                            .format("%Y-%m-%d")
+                            .to_string(),
+                        None,
+                        "date_only",
+                    )
+                } else if let Some(mins) = args.get("minutes_ago").and_then(Value::as_i64) {
+                    if !(0..=525_600).contains(&mins) {
+                        return Err((-32602, "minutes_ago must be 0 to 525600.".into()));
+                    }
+                    let at = now - Duration::minutes(mins);
+                    (
+                        at.date_naive().format("%Y-%m-%d").to_string(),
+                        Some(at.to_rfc3339()),
+                        "approximate_time",
+                    )
+                } else {
+                    (
+                        now.date_naive().format("%Y-%m-%d").to_string(),
+                        Some(now.to_rfc3339()),
+                        "recorded",
+                    )
+                };
+            let precision = string_opt(args, "fed_time_precision").unwrap_or(default_precision);
+            let raw_items = args
+                .get("items")
+                .and_then(Value::as_array)
+                .ok_or((-32602, "items array is required.".into()))?;
+            let mut items = Vec::with_capacity(raw_items.len());
+            for raw in raw_items {
+                let food_item_id = raw.get("food_item_id").and_then(Value::as_i64);
+                let inline_snapshot = if food_item_id.is_none() {
+                    let food_name = string(raw, "food_name")?;
+                    Some(crate::nutrition::NutritionSnapshot {
+                        food_name,
+                        brand: string_opt(raw, "brand").map(ToOwned::to_owned),
+                        variant: string_opt(raw, "variant").map(ToOwned::to_owned),
+                        category: string_opt(raw, "category").map(ToOwned::to_owned),
+                        completeness: string_opt(raw, "completeness").map(ToOwned::to_owned),
+                        serving_size_value: opt_f64(raw, "serving_size_value")?,
+                        serving_size_unit: string_opt(raw, "serving_size_unit")
+                            .map(ToOwned::to_owned),
+                        serving_label: string_opt(raw, "serving_label").map(ToOwned::to_owned),
+                        nutrition_basis: string_opt(raw, "nutrition_basis").map(ToOwned::to_owned),
+                        kcal_per_basis: opt_f64(raw, "kcal_per_basis")?,
+                        protein_g: opt_f64(raw, "protein_g")?,
+                        fat_g: opt_f64(raw, "fat_g")?,
+                        phosphorus_mg: opt_f64(raw, "phosphorus_mg")?,
+                        sodium_mg: opt_f64(raw, "sodium_mg")?,
+                        moisture_pct: opt_f64(raw, "moisture_pct")?,
+                        nutrition_confidence: string_opt(raw, "nutrition_confidence")
+                            .unwrap_or("")
+                            .to_owned(),
+                        nutrition_source: string_opt(raw, "nutrition_source")
+                            .map(ToOwned::to_owned),
+                    })
+                } else {
+                    None
+                };
+                items.push(crate::nutrition::NewFoodIntakeItem {
+                    food_item_id,
+                    inline_snapshot,
+                    intake_status: string(raw, "intake_status")?,
+                    appetite: string_opt(raw, "appetite").map(ToOwned::to_owned),
+                    offered_amount: opt_f64(raw, "offered_amount")?,
+                    offered_unit: string_opt(raw, "offered_unit").map(ToOwned::to_owned),
+                    consumed_amount: opt_f64(raw, "consumed_amount")?,
+                    consumed_unit: string_opt(raw, "consumed_unit").map(ToOwned::to_owned),
+                    is_approximate: raw
+                        .get("is_approximate")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    preparation: string_opt(raw, "preparation").map(ToOwned::to_owned),
+                    original_wording: string_opt(raw, "original_wording")
+                        .map(ToOwned::to_owned)
+                        .unwrap_or_else(|| top_wording.clone()),
+                    notes: string_opt(raw, "notes").map(ToOwned::to_owned),
+                });
+            }
+            let recorded = crate::nutrition::record_meal_entries(
+                &state.db,
+                user.household_id,
+                pet_id,
+                &user.audit_actor(),
+                "mcp",
+                &fed_on,
+                fed_at.as_deref(),
+                precision,
+                string_opt(args, "meal_label"),
+                string_opt(args, "idempotency_key"),
+                items,
+            )
+            .await
+            .map_err(|e| (-32602, e.to_string()))?;
+
+            let day_entries = crate::nutrition::list_food_entries(
+                &state.db,
+                user.household_id,
+                pet_id,
+                crate::nutrition::FoodEntryFilter {
+                    since: Some(fed_on.clone()),
+                    until: Some(fed_on.clone()),
+                    limit: 200,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(internal)?;
+            let target = crate::nutrition::get_active_target(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?;
+            let day_summary =
+                crate::nutrition::summarize_day(&fed_on, &day_entries.items, target.as_ref());
+            let meal_kcal_subtotal: f64 = recorded
+                .entries
+                .iter()
+                .filter_map(|e| e.computed_kcal)
+                .sum();
+            let meal_has_missing_kcal = recorded
+                .entries
+                .iter()
+                .any(|e| matches!(e.calculation_status.as_str(), "unknown_amount" | "unknown_nutrition" | "incompatible_basis"));
+            Ok(json!({
+                "meal_group_id": recorded.meal_group_id,
+                "deduplicated": recorded.deduplicated,
+                "entries": recorded.entries,
+                "meal_kcal_subtotal": (meal_kcal_subtotal * 100.0).round() / 100.0,
+                "meal_has_missing_kcal": meal_has_missing_kcal,
+                "day_summary": day_summary
+            }))
+        }
+        .await,
+        "list_food_intake" => async {
+            let pet_id = integer(args, "pet_id")?;
+            if db::get_pet(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?
+                .is_none()
+            {
+                return Err((-32602, "That pet is not in this household.".into()));
+            }
+            let page = crate::nutrition::list_food_entries(
+                &state.db,
+                user.household_id,
+                pet_id,
+                crate::nutrition::FoodEntryFilter {
+                    since: string_opt(args, "since").map(ToOwned::to_owned),
+                    until: string_opt(args, "until").map(ToOwned::to_owned),
+                    intake_status: string_opt(args, "intake_status").map(ToOwned::to_owned),
+                    food_item_id: args.get("food_item_id").and_then(Value::as_i64),
+                    limit: args
+                        .get("limit")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(25)
+                        .clamp(1, 100),
+                    offset: args.get("offset").and_then(Value::as_u64).unwrap_or(0),
+                },
+            )
+            .await
+            .map_err(|e| (-32602, e.to_string()))?;
+            serde_json::to_value(page).map_err(internal)
+        }
+        .await,
+        "update_food_intake" => async {
+            let entry_id = integer(args, "entry_id")?;
+            let patch = crate::nutrition::FoodIntakePatch {
+                intake_status: args
+                    .get("intake_status")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                appetite: patch_opt_str(args, "appetite"),
+                offered_amount: patch_opt_f64(args, "offered_amount")?,
+                offered_unit: patch_opt_str(args, "offered_unit"),
+                consumed_amount: patch_opt_f64(args, "consumed_amount")?,
+                consumed_unit: patch_opt_str(args, "consumed_unit"),
+                is_approximate: args.get("is_approximate").and_then(Value::as_bool),
+                fed_on: args
+                    .get("fed_on")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                meal_label: patch_opt_str(args, "meal_label"),
+                preparation: patch_opt_str(args, "preparation"),
+                original_wording: args
+                    .get("original_wording")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                notes: patch_opt_str(args, "notes"),
+            };
+            let entry = crate::nutrition::update_food_entry(
+                &state.db,
+                user.household_id,
+                &user.audit_actor(),
+                entry_id,
+                patch,
+            )
+            .await
+            .map_err(|e| (-32602, e.to_string()))?
+            .ok_or((-32602, "Food diary entry not found in this household.".into()))?;
+            Ok(json!({"updated": true, "entry": entry}))
+        }
+        .await,
+        "delete_food_intake" => async {
+            let entry_id = integer(args, "entry_id")?;
+            let deleted = crate::nutrition::delete_food_entry(
+                &state.db,
+                user.household_id,
+                &user.audit_actor(),
+                entry_id,
+            )
+            .await
+            .map_err(internal)?
+            .ok_or((-32602, "Active food diary entry not found in this household.".into()))?;
+            Ok(json!({"deleted": true, "entry_id": deleted.id, "fed_on": deleted.fed_on}))
+        }
+        .await,
+        "get_food_diary_summary" => async {
+            let pet_id = integer(args, "pet_id")?;
+            if db::get_pet(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?
+                .is_none()
+            {
+                return Err((-32602, "That pet is not in this household.".into()));
+            }
+            let today = Utc::now().date_naive();
+            let (since, until) = if let Some(single) = opt_date(args, "date")? {
+                (single, single)
+            } else {
+                let until = opt_date(args, "until")?.unwrap_or(today);
+                let since = opt_date(args, "since")?.unwrap_or(until);
+                (since, until)
+            };
+            if since > until {
+                return Err((-32602, "since cannot be after until.".into()));
+            }
+            if (until - since).num_days() > 90 {
+                return Err((-32602, "Date range cannot exceed 90 days.".into()));
+            }
+            let page = crate::nutrition::list_food_entries(
+                &state.db,
+                user.household_id,
+                pet_id,
+                crate::nutrition::FoodEntryFilter {
+                    since: Some(since.format("%Y-%m-%d").to_string()),
+                    until: Some(until.format("%Y-%m-%d").to_string()),
+                    limit: 500,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(internal)?;
+            let target = crate::nutrition::get_active_target(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?;
+            let (averages, days) =
+                crate::nutrition::compute_window_averages(since, until, &page.items, target.as_ref());
+            let recent_meals: Vec<Value> = page
+                .items
+                .iter()
+                .take(20)
+                .map(|e| {
+                    json!({
+                        "entry_id": e.id,
+                        "fed_on": e.fed_on,
+                        "meal_label": e.meal_label,
+                        "food": e.display_food_name(),
+                        "intake_status": e.intake_status,
+                        "amount": e.amount_label(),
+                        "computed_kcal": e.computed_kcal,
+                        "calculation_status": e.calculation_status,
+                        "appetite": e.appetite,
+                    })
+                })
+                .collect();
+            Ok(json!({
+                "pet_id": pet_id,
+                "since": since.format("%Y-%m-%d").to_string(),
+                "until": until.format("%Y-%m-%d").to_string(),
+                "summary": averages,
+                "days": days,
+                "recent_entries": recent_meals,
+                "active_target": target,
+                "note": "Partial subtotals exclude items with missing nutrition, unknown quantities, or incompatible units. Unlogged days are never treated as fasting."
+            }))
+        }
+        .await,
+        "get_nutrition_trends" => async {
+            let pet_id = integer(args, "pet_id")?;
+            if db::get_pet(&state.db, user.household_id, pet_id)
+                .await
+                .map_err(internal)?
+                .is_none()
+            {
+                return Err((-32602, "That pet is not in this household.".into()));
+            }
+            let today = Utc::now().date_naive();
+            let days_arg = args
+                .get("days")
+                .and_then(Value::as_i64)
+                .unwrap_or(30)
+                .clamp(1, 90);
+            let until = opt_date(args, "until")?.unwrap_or(today);
+            let since = opt_date(args, "since")?.unwrap_or_else(|| until - Duration::days(days_arg - 1));
+            if since > until {
+                return Err((-32602, "since cannot be after until.".into()));
+            }
+            if (until - since).num_days() > 90 {
+                return Err((-32602, "Trend range cannot exceed 90 days.".into()));
+            }
+            let report = crate::nutrition::load_trend_report(
+                &state.db,
+                user.household_id,
+                pet_id,
+                since,
+                until,
+            )
+            .await
+            .map_err(internal)?;
+            let include_clinical = args
+                .get("include_clinical_context")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let mut out = serde_json::to_value(&report).map_err(internal)?;
+            if include_clinical {
+                let since_str = since.format("%Y-%m-%d").to_string();
+                let until_str = until.format("%Y-%m-%d").to_string();
+                let weights: Vec<Value> = db::list_weights(&state.db, user.household_id, pet_id)
+                    .await
+                    .map_err(internal)?
+                    .into_iter()
+                    .filter(|w| {
+                        let d = w.measured_at.date_naive().format("%Y-%m-%d").to_string();
+                        d >= since_str && d <= until_str
+                    })
+                    .map(|w| {
+                        json!({
+                            "date": w.measured_at.date_naive().format("%Y-%m-%d").to_string(),
+                            "weight_kg": w.weight_kg,
+                            "note": w.note
+                        })
+                    })
+                    .collect();
+                let prescriptions =
+                    db::list_prescriptions(&state.db, user.household_id, pet_id, 40)
+                        .await
+                        .map_err(internal)?;
+                let symptoms: Vec<Value> =
+                    db::list_events(&state.db, user.household_id, Some(pet_id), 100)
+                        .await
+                        .map_err(internal)?
+                        .into_iter()
+                        .filter(|e| {
+                            let d = e.occurred_at.date_naive().format("%Y-%m-%d").to_string();
+                            d >= since_str && d <= until_str
+                        })
+                        .map(|e| {
+                            json!({
+                                "event_id": e.id,
+                                "date": e.occurred_at.date_naive().format("%Y-%m-%d").to_string(),
+                                "event_type": e.event_type,
+                                "concept": e.concept,
+                                "summary": e.summary
+                            })
+                        })
+                        .collect();
+                let labs: Vec<Value> = db::list_lab_reports(&state.db, user.household_id, pet_id)
+                    .await
+                    .map_err(internal)?
+                    .into_iter()
+                    .filter(|r| {
+                        r.test_date
+                            .as_deref()
+                            .is_some_and(|d| d >= since_str.as_str() && d <= until_str.as_str())
+                    })
+                    .map(|r| {
+                        json!({
+                            "report_id": r.id,
+                            "test_date": r.test_date,
+                            "source_filename": r.source_filename,
+                            "result_count": r.results.len()
+                        })
+                    })
+                    .collect();
+                if let Some(obj) = out.as_object_mut() {
+                    obj.insert(
+                        "clinical_context".into(),
+                        json!({
+                            "weights": weights,
+                            "prescriptions": prescriptions,
+                            "events": symptoms,
+                            "labs": labs,
+                            "caution": "Chronological alignment shows temporal proximity only and does not establish causation or constitute a diagnosis."
+                        }),
+                    );
+                }
+            }
+            Ok(out)
+        }
+        .await,
+        "set_nutrition_target" => async {
+            let pet_id = integer(args, "pet_id")?;
+            if args.get("clear").and_then(Value::as_bool) == Some(true) {
+                let cleared = crate::nutrition::clear_nutrition_target(
+                    &state.db,
+                    user.household_id,
+                    pet_id,
+                    &user.audit_actor(),
+                )
+                .await
+                .map_err(internal)?;
+                return Ok(json!({"cleared": cleared, "pet_id": pet_id}));
+            }
+            let input = crate::nutrition::NewNutritionTarget {
+                daily_kcal_min: opt_f64(args, "daily_kcal_min")?,
+                daily_kcal_max: opt_f64(args, "daily_kcal_max")?,
+                daily_protein_g_min: opt_f64(args, "daily_protein_g_min")?,
+                daily_protein_g_max: opt_f64(args, "daily_protein_g_max")?,
+                daily_fat_g_min: opt_f64(args, "daily_fat_g_min")?,
+                daily_fat_g_max: opt_f64(args, "daily_fat_g_max")?,
+                daily_phosphorus_mg_max: opt_f64(args, "daily_phosphorus_mg_max")?,
+                daily_sodium_mg_max: opt_f64(args, "daily_sodium_mg_max")?,
+                source: string(args, "source")?,
+                source_note: string(args, "source_note")?,
+                effective_from: string_opt(args, "effective_from").map(ToOwned::to_owned),
+            };
+            let target = crate::nutrition::set_nutrition_target(
+                &state.db,
+                user.household_id,
+                pet_id,
+                &user.audit_actor(),
+                input,
+            )
+            .await
+            .map_err(|e| (-32602, e.to_string()))?;
+            Ok(json!({
+                "target": target,
+                "note": "Owner/vet-supplied target stored with provenance. Pet Health Journal does not prescribe calorie or nutrient limits."
+            }))
+        }
+        .await,
+        _ => return None,
+    };
+    Some(result)
 }
 
 /// MCP requires `structuredContent` to be a JSON object; clients such as
@@ -2952,6 +3828,16 @@ mod tests {
             "create_vet_share",
             "list_vet_shares",
             "revoke_vet_share",
+            "list_foods",
+            "add_food",
+            "update_food",
+            "record_food_intake",
+            "list_food_intake",
+            "update_food_intake",
+            "delete_food_intake",
+            "get_food_diary_summary",
+            "get_nutrition_trends",
+            "set_nutrition_target",
         ] {
             assert!(names.contains(&required), "missing tool: {required}");
         }

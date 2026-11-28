@@ -17,7 +17,7 @@ pre{white-space:pre-wrap} .notice{border-left:4px solid #d7b66b;padding:12px;bac
 <section class="panel"><h2>Symptoms, treatments, responses, vet discussion and open questions</h2>
 {% if detail.updates.is_empty() %}<p>No case-specific updates recorded.</p>{% endif %}
 {% for entry in detail.updates %}<article><strong>{{ entry.kind }}</strong> · {% match entry.observed_on %}{% when Some with (date) %}{{ date }}{% when None %}Date unknown{% endmatch %}
-<p>{{ entry.original_wording }}</p><small>{% if entry.source == "owner_relayed_vet" %}Owner relaying veterinarian{% else %}Owner-reported{% endif %}{% match entry.linked_event_id %}{% when Some with (id) %} · Linked event #{{ id }}{% when None %}{% endmatch %}</small></article>{% endfor %}</section>
+<p>{{ entry.original_wording }}</p><small>{% if entry.source == "owner_relayed_vet" %}Owner relaying veterinarian{% else %}Owner-reported{% endif %}{% match entry.linked_event_id %}{% when Some with (id) %} · Linked event #{{ id }}{% when None %}{% endmatch %}{% match entry.linked_food_entry_id %}{% when Some with (id) %} · Linked food entry #{{ id }}{% when None %}{% endmatch %}</small></article>{% endfor %}</section>
 <section class="panel"><h2>Differential considerations — not diagnoses</h2>
 {% if detail.hypotheses.is_empty() %}<p>None recorded.</p>{% endif %}
 {% for h in detail.hypotheses %}<article><strong>{{ h.label }}</strong> · <span class="tag">{{ h.status }}</span><p>{% match h.rationale %}{% when Some with (r) %}{{ r }}{% when None %}No rationale recorded{% endmatch %}</p>
@@ -31,6 +31,19 @@ pre{white-space:pre-wrap} .notice{border-left:4px solid #d7b66b;padding:12px;bac
 {% match p.frequency %}{% when Some with (freq) %} · {{ freq }}{% when None %}{% endmatch %}</p></article>{% endfor %}</section>
 <section class="panel"><h2>Recent pet health history (up to 40 events, may include unrelated records)</h2>
 {% for event in events %}<article><strong>{{ event.occurred_label }}: {{ event.summary }}</strong><p>{{ event.raw_input }}</p></article>{% endfor %}</section>
+<section class="panel"><h2>Nutrition &amp; appetite summary (last 30 days, context only)</h2>
+<p class="muted">{{ nutrition.clinical_note }}</p>
+{% if nutrition.window_30d.total_entries == 0 %}<p>No feeding entries recorded in the last 30 days (not interpreted as fasting).</p>
+{% else %}
+<article>
+<p><strong>7-day window:</strong> {{ nutrition.window_7d.days_with_entries }} of 7 days logged · {% match nutrition.window_7d.avg_kcal_per_computable_day %}{% when Some with (v) %}Avg {{ v }} kcal/logged day{% when None %}Calories unavailable{% endmatch %} · {{ nutrition.window_7d.refused_entries }} refusal(s)</p>
+<p><strong>30-day window:</strong> {{ nutrition.window_30d.days_with_entries }} of 30 days logged ({{ nutrition.window_30d.days_with_complete_kcal }} complete, {{ nutrition.window_30d.days_with_partial_kcal }} partial subtotal) · {% match nutrition.window_30d.avg_kcal_per_computable_day %}{% when Some with (v) %}Avg {{ v }} kcal/logged day{% when None %}Calories unavailable{% endmatch %} · {{ nutrition.window_30d.refused_entries }} refusal(s)</p>
+{% match nutrition.active_target %}{% when Some with (t) %}<p><strong>Owner/vet-entered target:</strong> {% match t.kcal_range_label() %}{% when Some with (lbl) %}{{ lbl }} · {% when None %}{% endmatch %}{{ t.source_note }} ({{ t.source }})</p>{% when None %}{% endmatch %}
+</article>
+{% if !nutrition.food_acceptance.is_empty() %}
+{% for item in nutrition.food_acceptance %}<article><strong>{{ item.food_name }}</strong>: offered {{ item.times_offered }}× (ate all {{ item.consumed_all }}, partial {{ item.consumed_partial }}, refused {{ item.refused }}, unknown qty {{ item.consumed_unknown_amount }})</article>{% endfor %}
+{% endif %}
+{% endif %}</section>
 <section class="panel"><h2>Lab reports (if recorded)</h2>
 {% for lab in labs %}<article><strong>{{ lab.source_filename }}</strong>
 {% match lab.test_date %}{% when Some with (date) %} · {{ date }}{% when None %} · Date unavailable{% endmatch %}

@@ -21,6 +21,9 @@ mod login_code_tests;
 mod mcp;
 #[cfg(test)]
 mod mcp_e2e_tests;
+mod nutrition;
+#[cfg(test)]
+mod nutrition_tests;
 mod ocr;
 mod passports;
 mod photos;

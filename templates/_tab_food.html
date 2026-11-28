@@ -1,0 +1,490 @@
+<section id="food-tab" class="food-tab" aria-label="Food and nutrition diary">
+  {% match notice %}
+  {% when Some with (msg) %}
+  <div class="food-notice" role="status" aria-live="polite">
+    <span>{{ msg }}</span>
+    {% match undo_entry_id %}
+    {% when Some with (deleted_id) %}
+    <form hx-post="/food/entries/{{ deleted_id }}/restore" hx-target="#food-tab" hx-swap="outerHTML" method="post" action="/food/entries/{{ deleted_id }}/restore">
+      <input type="hidden" name="pet_id" value="{{ pet.id }}">
+      <input type="hidden" name="selected_date" value="{{ selected_date }}">
+      <button class="button secondary food-undo-btn" type="submit">Restore entry</button>
+    </form>
+    {% when None %}{% endmatch %}
+  </div>
+  {% when None %}{% endmatch %}
+
+  {% match error_msg %}
+  {% when Some with (err) %}
+  <div class="auth-error" role="alert">{{ err }}</div>
+  {% when None %}{% endmatch %}
+
+  {# 1. Selected-day summary + historical navigation #}
+  <section class="tracker-box food-summary-box">
+    <div class="food-head">
+      <div>
+        <div class="side-label">FOOD &amp; NUTRITION / {{ pet.name|upper }}</div>
+        <h2>{% if is_today %}Today’s intake{% else %}Diary for {{ selected_date }}{% endif %}</h2>
+      </div>
+      <nav class="food-day-nav" aria-label="Food diary date navigation">
+        <a class="button secondary" href="/app?pet={{ pet.id }}&amp;view=food&amp;date={{ prev_date }}" hx-get="/app/tab/food?pet={{ pet.id }}&amp;date={{ prev_date }}" hx-target="#tab-body" hx-swap="innerHTML">← Prev</a>
+        <form class="food-date-jump" method="get" action="/app" hx-get="/app/tab/food" hx-target="#tab-body" hx-swap="innerHTML">
+          <input type="hidden" name="pet" value="{{ pet.id }}">
+          <input type="hidden" name="view" value="food">
+          <input type="date" name="date" value="{{ selected_date }}" aria-label="Choose diary date" onchange="this.form.requestSubmit()">
+        </form>
+        {% if !is_today %}
+        <a class="button secondary" href="/app?pet={{ pet.id }}&amp;view=food&amp;date={{ next_date }}" hx-get="/app/tab/food?pet={{ pet.id }}&amp;date={{ next_date }}" hx-target="#tab-body" hx-swap="innerHTML">Next →</a>
+        <a class="button secondary" href="/app?pet={{ pet.id }}&amp;view=food" hx-get="/app/tab/food?pet={{ pet.id }}" hx-target="#tab-body" hx-swap="innerHTML">Today</a>
+        {% endif %}
+      </nav>
+    </div>
+
+    <div class="food-kpi-grid">
+      <div class="food-kpi">
+        <small>RECORDED CALORIES</small>
+        <strong>{{ day_summary.kcal_display() }}</strong>
+        <span>{{ day_summary.kcal_split_label() }}</span>
+      </div>
+      <div class="food-kpi">
+        <small>PROTEIN / FAT</small>
+        <strong>{{ day_summary.protein_fat_label() }}</strong>
+        <span>{% if day_summary.entries_with_protein > 0 || day_summary.entries_with_fat > 0 %}Protein {{ day_summary.entries_with_protein }} · Fat {{ day_summary.entries_with_fat }} items{% else %}No macro data recorded{% endif %}</span>
+      </div>
+      <div class="food-kpi">
+        <small>PHOSPHORUS / SODIUM</small>
+        <strong>{{ day_summary.phosphorus_sodium_label() }}</strong>
+        <span>{% if day_summary.entries_with_phosphorus > 0 || day_summary.entries_with_sodium > 0 %}P {{ day_summary.entries_with_phosphorus }} · Na {{ day_summary.entries_with_sodium }} items{% else %}Optional renal/cardiac tracking{% endif %}</span>
+      </div>
+      <div class="food-kpi">
+        <small>MEALS / REFUSALS</small>
+        <strong>{{ day_summary.meals_logged }} / {{ day_summary.refused_entries }}</strong>
+        <span>{% if day_summary.refused_entries > 0 %}{{ day_summary.refused_entries }} refused item(s){% else %}No refusals logged{% endif %}</span>
+      </div>
+    </div>
+
+    <p class="food-coverage-banner {% if day_summary.is_incomplete() %}incomplete{% endif %}">
+      <strong>Data coverage:</strong> {{ day_summary.coverage_note }}
+    </p>
+
+    {% match day_summary.target_comparison %}
+    {% when Some with (cmp) %}
+    <div class="food-target-strip">
+      <strong>Owner/vet target ({{ cmp.source }}):</strong>
+      <span>{{ cmp.summary }}</span>
+      <small>Source: {{ cmp.source_note }}</small>
+    </div>
+    {% when None %}{% endmatch %}
+
+    <details class="plan-add food-target-details">
+      <summary><span class="structured-pulse">◎</span><span><b>{% if active_target.is_some() %}Update or clear owner/vet nutrition target{% else %}Record an owner or vet nutrition target{% endif %}</b><small>Optional; never automatically prescribed</small></span></summary>
+      <form method="post" action="/food/targets" hx-post="/food/targets" hx-target="#food-tab" hx-swap="outerHTML" class="tracker-form">
+        <input type="hidden" name="pet_id" value="{{ pet.id }}">
+        <input type="hidden" name="selected_date" value="{{ selected_date }}">
+        <label>Min daily kcal <span class="field-hint">optional</span><input type="number" min="1" step="1" name="daily_kcal_min" value="{% match active_target %}{% when Some with (t) %}{% match t.daily_kcal_min %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}{% when None %}{% endmatch %}"></label>
+        <label>Max daily kcal <span class="field-hint">optional</span><input type="number" min="1" step="1" name="daily_kcal_max" value="{% match active_target %}{% when Some with (t) %}{% match t.daily_kcal_max %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}{% when None %}{% endmatch %}"></label>
+        <label>Max phosphorus (mg/day) <span class="field-hint">optional</span><input type="number" min="0" step="1" name="daily_phosphorus_mg_max" value="{% match active_target %}{% when Some with (t) %}{% match t.daily_phosphorus_mg_max %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}{% when None %}{% endmatch %}"></label>
+        <label>Max sodium (mg/day) <span class="field-hint">optional</span><input type="number" min="0" step="1" name="daily_sodium_mg_max" value="{% match active_target %}{% when Some with (t) %}{% match t.daily_sodium_mg_max %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}{% when None %}{% endmatch %}"></label>
+        <label>Source<select name="source"><option value="owner_relayed_vet">Veterinarian recommendation (owner-relayed)</option><option value="owner_entered">Owner-entered target</option></select></label>
+        <label>Effective from <span class="field-hint">optional</span><input type="date" name="effective_from"></label>
+        <label class="full-width">Provenance note (required)<input required maxlength="500" name="source_note" placeholder="e.g. Dr Smith renal check 2026-11-10: aim for 190-220 kcal/day" value="{% match active_target %}{% when Some with (t) %}{{ t.source_note }}{% when None %}{% endmatch %}"></label>
+        <button class="button secondary full-width" type="submit">Save target</button>
+      </form>
+      {% if active_target.is_some() %}
+      <form method="post" action="/food/targets/clear" hx-post="/food/targets/clear" hx-target="#food-tab" hx-swap="outerHTML" class="food-clear-target">
+        <input type="hidden" name="pet_id" value="{{ pet.id }}">
+        <input type="hidden" name="selected_date" value="{{ selected_date }}">
+        <button class="quiet-action" type="submit">Clear active target</button>
+      </form>
+      {% endif %}
+    </details>
+  </section>
+
+  {# 2. Frequent foods one-tap logging #}
+  {% if !frequent_foods.is_empty() %}
+  <section class="plan-log">
+    <div class="side-label">QUICK LOG / FREQUENT FOODS</div>
+    <h3>One-tap feeding or refusal</h3>
+    <p>Log a reusable household food for {{ selected_date }} with a single tap.</p>
+    <div class="food-quick-grid">
+      {% for food in frequent_foods %}
+      <article class="food-quick-card">
+        <div class="food-quick-info">
+          <strong>{{ food.display_name() }}</strong>
+          <small>{{ food.basis_summary() }} · {{ food.nutrition_confidence }}</small>
+        </div>
+        <div class="food-quick-actions">
+          <form method="post" action="/food/entries" hx-post="/food/entries" hx-target="#food-tab" hx-swap="outerHTML">
+            <input type="hidden" name="pet_id" value="{{ pet.id }}">
+            <input type="hidden" name="selected_date" value="{{ selected_date }}">
+            <input type="hidden" name="fed_on" value="{{ selected_date }}">
+            <input type="hidden" name="food_item_id" value="{{ food.id }}">
+            <input type="hidden" name="intake_status" value="consumed_all">
+            <input type="hidden" name="consumed_amount" value="1">
+            <input type="hidden" name="consumed_unit" value="{{ food.default_quick_unit() }}">
+            <input type="hidden" name="original_wording" value="Ate 1 {{ food.default_quick_unit() }} of {{ food.display_name() }}">
+            <button class="button secondary" type="submit">Ate 1 {{ food.default_quick_unit() }}</button>
+          </form>
+          <form method="post" action="/food/entries" hx-post="/food/entries" hx-target="#food-tab" hx-swap="outerHTML">
+            <input type="hidden" name="pet_id" value="{{ pet.id }}">
+            <input type="hidden" name="selected_date" value="{{ selected_date }}">
+            <input type="hidden" name="fed_on" value="{{ selected_date }}">
+            <input type="hidden" name="food_item_id" value="{{ food.id }}">
+            <input type="hidden" name="intake_status" value="consumed_partial">
+            <input type="hidden" name="offered_amount" value="1">
+            <input type="hidden" name="offered_unit" value="{{ food.default_quick_unit() }}">
+            <input type="hidden" name="consumed_amount" value="0.5">
+            <input type="hidden" name="consumed_unit" value="{{ food.default_quick_unit() }}">
+            <input type="hidden" name="is_approximate" value="1">
+            <input type="hidden" name="original_wording" value="Ate about half a {{ food.default_quick_unit() }} of {{ food.display_name() }}">
+            <button class="button secondary" type="submit">Ate ½</button>
+          </form>
+          <form method="post" action="/food/entries" hx-post="/food/entries" hx-target="#food-tab" hx-swap="outerHTML">
+            <input type="hidden" name="pet_id" value="{{ pet.id }}">
+            <input type="hidden" name="selected_date" value="{{ selected_date }}">
+            <input type="hidden" name="fed_on" value="{{ selected_date }}">
+            <input type="hidden" name="food_item_id" value="{{ food.id }}">
+            <input type="hidden" name="intake_status" value="refused">
+            <input type="hidden" name="appetite" value="refused">
+            <input type="hidden" name="offered_amount" value="1">
+            <input type="hidden" name="offered_unit" value="{{ food.default_quick_unit() }}">
+            <input type="hidden" name="original_wording" value="Refused {{ food.display_name() }}">
+            <button class="button secondary food-refuse-btn" type="submit">Refused</button>
+          </form>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  {# 3. Quick manual food & refusal logging form #}
+  <section class="plan-log">
+    <div class="side-label">MANUAL ENTRY</div>
+    <h3>Log a meal, treat, or refusal</h3>
+    <p>Missing nutritional information never blocks recording. Unknown quantities stay unknown (never 0 kcal).</p>
+    <form method="post" action="/food/entries" hx-post="/food/entries" hx-target="#food-tab" hx-swap="outerHTML" class="tracker-form food-entry-form">
+      <input type="hidden" name="pet_id" value="{{ pet.id }}">
+      <input type="hidden" name="selected_date" value="{{ selected_date }}">
+      <label class="full-width">From household catalogue <span class="field-hint">optional</span>
+        <select name="food_item_id">
+          <option value="">— Or type a food name below —</option>
+          {% for f in foods %}<option value="{{ f.id }}">{{ f.display_name() }} ({{ f.basis_summary() }})</option>{% endfor %}
+        </select>
+      </label>
+      <label class="full-width">Food name <span class="field-hint">required if not selected above</span>
+        <input maxlength="140" name="food_name" placeholder="e.g. Boiled plain chicken breast, Churu treat">
+      </label>
+      <label>Outcome
+        <select name="intake_status">
+          <option value="consumed_all">Ate all</option>
+          <option value="consumed_partial">Ate part</option>
+          <option value="refused">Refused (0 eaten)</option>
+          <option value="consumed_unknown_amount">Ate (unknown amount)</option>
+          <option value="not_offered">Not offered</option>
+        </select>
+      </label>
+      <label>Appetite <span class="field-hint">optional</span>
+        <select name="appetite">
+          <option value="">— unspecified —</option>
+          <option value="eager">Eager</option>
+          <option value="normal">Normal</option>
+          <option value="reduced">Reduced</option>
+          <option value="picky">Picky</option>
+          <option value="refused">Refused</option>
+          <option value="unknown">Unknown</option>
+        </select>
+      </label>
+      <label>Consumed amount <span class="field-hint">leave blank if unknown</span>
+        <input type="number" min="0" step="0.01" name="consumed_amount" placeholder="e.g. 25 or 0.5">
+      </label>
+      <label>Consumed unit
+        <input maxlength="40" name="consumed_unit" placeholder="g, ml, pouch, tube, tsp, serving">
+      </label>
+      <label>Offered amount <span class="field-hint">optional</span>
+        <input type="number" min="0" step="0.01" name="offered_amount" placeholder="e.g. 85 or 1">
+      </label>
+      <label>Offered unit
+        <input maxlength="40" name="offered_unit" placeholder="g, pouch, can">
+      </label>
+      <label>Date
+        <input type="date" name="fed_on" value="{{ selected_date }}">
+      </label>
+      <label>Meal label <span class="field-hint">optional</span>
+        <input maxlength="40" name="meal_label" placeholder="breakfast, lunch, dinner, snack">
+      </label>
+      <label>Preparation <span class="field-hint">optional</span>
+        <input maxlength="200" name="preparation" placeholder="warmed, mixed with water, hand-fed">
+      </label>
+      <label class="food-check"><input type="checkbox" name="is_approximate" value="1"> Approximate quantity</label>
+      <label class="full-width">Original wording / note
+        <input maxlength="2000" name="original_wording" placeholder="e.g. Refused usual breakfast, ate a teaspoon of cream">
+      </label>
+      <button class="button primary full-width" type="submit">Record feeding entry</button>
+    </form>
+  </section>
+
+  {# 4. Entries for selected day (with inline edit + undo) #}
+  <section class="plan-log">
+    <div class="side-label">DIARY ENTRIES / {{ selected_date }}</div>
+    <h3>Recorded meals on {{ selected_date }}</h3>
+    {% if day_entries.is_empty() %}
+    <p class="tracker-empty">No meals recorded for {{ selected_date }}. Missing days are never interpreted as fasting.</p>
+    {% else %}
+    <div class="food-entries-list">
+      {% for entry in day_entries %}
+      <article class="food-entry-row" data-intake="{{ entry.intake_status }}">
+        <div class="food-entry-main">
+          <div class="food-entry-meta">
+            <span class="type {% if entry.intake_status == "refused" %}warning{% else if entry.intake_status == "not_offered" %}neutral{% else %}active{% endif %}">{{ entry.intake_status_label() }}</span>
+            {% match entry.meal_label %}{% when Some with (meal) %}<span class="food-pill">{{ meal }}</span>{% when None %}{% endmatch %}
+            {% match entry.appetite %}{% when Some with (app) %}<span class="food-pill">Appetite: {{ app }}</span>{% when None %}{% endmatch %}
+            <span class="food-pill {% if entry.calculation_status == "computed" %}verified{% else if entry.calculation_status == "estimated" %}estimated{% else %}unknown{% endif %}">{{ entry.kcal_label() }}</span>
+          </div>
+          <h4>{{ entry.display_food_name() }} · {{ entry.amount_label() }}</h4>
+          <p class="food-wording">“{{ entry.original_wording }}”</p>
+          <small class="food-meta-line">
+            {% match entry.preparation %}{% when Some with (prep) %}Prep: {{ prep }} · {% when None %}{% endmatch %}
+            {% match entry.snapshot.nutrition_source %}{% when Some with (src) %}Source: {{ src }} · {% when None %}{% endmatch %}
+            {% match entry.calculation_note %}{% when Some with (note) %}{{ note }}{% when None %}Entry #{{ entry.id }}{% endmatch %}
+          </small>
+          <details class="event-label-editor food-edit-details">
+            <summary>Edit entry</summary>
+            <form method="post" action="/food/entries/{{ entry.id }}/update" hx-post="/food/entries/{{ entry.id }}/update" hx-target="#food-tab" hx-swap="outerHTML" class="tracker-form food-edit-form">
+              <input type="hidden" name="pet_id" value="{{ pet.id }}">
+              <input type="hidden" name="selected_date" value="{{ selected_date }}">
+              <label>Outcome
+                <select name="intake_status">
+                  <option value="consumed_all" {% if entry.intake_status == "consumed_all" %}selected{% endif %}>Ate all</option>
+                  <option value="consumed_partial" {% if entry.intake_status == "consumed_partial" %}selected{% endif %}>Ate part</option>
+                  <option value="refused" {% if entry.intake_status == "refused" %}selected{% endif %}>Refused</option>
+                  <option value="consumed_unknown_amount" {% if entry.intake_status == "consumed_unknown_amount" %}selected{% endif %}>Ate (unknown amount)</option>
+                  <option value="not_offered" {% if entry.intake_status == "not_offered" %}selected{% endif %}>Not offered</option>
+                </select>
+              </label>
+              <label>Appetite
+                <select name="appetite">
+                  <option value="">— unspecified —</option>
+                  <option value="eager" {% if entry.appetite.as_deref() == Some("eager") %}selected{% endif %}>Eager</option>
+                  <option value="normal" {% if entry.appetite.as_deref() == Some("normal") %}selected{% endif %}>Normal</option>
+                  <option value="reduced" {% if entry.appetite.as_deref() == Some("reduced") %}selected{% endif %}>Reduced</option>
+                  <option value="picky" {% if entry.appetite.as_deref() == Some("picky") %}selected{% endif %}>Picky</option>
+                  <option value="refused" {% if entry.appetite.as_deref() == Some("refused") %}selected{% endif %}>Refused</option>
+                  <option value="unknown" {% if entry.appetite.as_deref() == Some("unknown") %}selected{% endif %}>Unknown</option>
+                </select>
+              </label>
+              <label>Consumed amount
+                <input type="number" min="0" step="0.01" name="consumed_amount" value="{% match entry.consumed_amount %}{% when Some with (v) %}{{ v }}{% when None %}{% endmatch %}">
+              </label>
+              <label>Unit
+                <input maxlength="40" name="consumed_unit" value="{% match entry.consumed_unit %}{% when Some with (u) %}{{ u }}{% when None %}{% endmatch %}">
+              </label>
+              <label>Date
+                <input type="date" name="fed_on" value="{{ entry.fed_on }}">
+              </label>
+              <label>Meal
+                <input maxlength="40" name="meal_label" value="{% match entry.meal_label %}{% when Some with (m) %}{{ m }}{% when None %}{% endmatch %}">
+              </label>
+              <label class="full-width">Original wording
+                <input required maxlength="2000" name="original_wording" value="{{ entry.original_wording }}">
+              </label>
+              <button class="button secondary full-width" type="submit">Save correction</button>
+            </form>
+          </details>
+        </div>
+        <div class="food-entry-actions">
+          <form method="post" action="/food/entries/{{ entry.id }}/delete" hx-post="/food/entries/{{ entry.id }}/delete" hx-target="#food-tab" hx-swap="outerHTML">
+            <input type="hidden" name="pet_id" value="{{ pet.id }}">
+            <input type="hidden" name="selected_date" value="{{ selected_date }}">
+            <button class="quiet-action" type="submit">Undo</button>
+          </form>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </section>
+
+  {# 5. 7-day and 30-day trends + Weight vs Calories SVG chart #}
+  <section class="plan-log">
+    <div class="side-label">7-DAY &amp; 30-DAY TRENDS</div>
+    <h3>Intake trends &amp; weight comparison</h3>
+    <p>{{ trends.clinical_note }}</p>
+    <div class="food-kpi-grid">
+      <div class="food-kpi">
+        <small>7-DAY AVG (LOGGED DAYS)</small>
+        <strong>{{ trends.window_7d.avg_kcal_label() }}</strong>
+        <span>{{ trends.window_7d.days_with_entries }} of 7 days logged · {{ trends.window_7d.refused_entries }} refusal(s)</span>
+      </div>
+      <div class="food-kpi">
+        <small>30-DAY AVG (LOGGED DAYS)</small>
+        <strong>{{ trends.window_30d.avg_kcal_label() }}</strong>
+        <span>{{ trends.window_30d.days_with_entries }} of 30 days logged ({{ trends.window_30d.days_with_partial_kcal }} partial)</span>
+      </div>
+      <div class="food-kpi">
+        <small>30-DAY COMPLETE-DAY AVG</small>
+        <strong>{{ trends.window_30d.avg_complete_kcal_label() }}</strong>
+        <span>{{ trends.window_30d.days_with_complete_kcal }} complete logged day(s)</span>
+      </div>
+      <div class="food-kpi">
+        <small>30-DAY REFUSAL RATE</small>
+        <strong>{{ trends.window_30d.refusal_rate_label() }}</strong>
+        <span>{{ trends.window_30d.refused_entries }} of {{ trends.window_30d.total_entries }} entries</span>
+      </div>
+    </div>
+
+    {% if chart.has_data %}
+    <div class="food-chart-wrap">
+      <svg class="vet-chart food-chart" viewBox="0 0 600 218" role="img" aria-label="30-day weight versus recorded daily calorie intake" xmlns="http://www.w3.org/2000/svg">
+        <line x1="48" y1="24" x2="48" y2="172" stroke="currentColor" opacity=".3"/>
+        <line x1="48" y1="172" x2="552" y2="172" stroke="currentColor" opacity=".3"/>
+        {% if !chart.kcal_max_label.is_empty() %}<text x="44" y="28" text-anchor="end" fill="currentColor" font-size="11">{{ chart.kcal_max_label }}</text>{% endif %}
+        {% if !chart.weight_max_label.is_empty() %}<text x="556" y="28" text-anchor="start" fill="#55aef3" font-size="11">{{ chart.weight_max_label }}</text><text x="556" y="172" text-anchor="start" fill="#55aef3" font-size="11">{{ chart.weight_min_label }}</text>{% endif %}
+        {% match chart.target_min_y %}{% when Some with (ty) %}<line x1="48" y1="{{ ty }}" x2="552" y2="{{ ty }}" stroke="#ffcd4a" opacity=".45" stroke-dasharray="4 4"/>{% when None %}{% endmatch %}
+        {% match chart.target_max_y %}{% when Some with (ty) %}<line x1="48" y1="{{ ty }}" x2="552" y2="{{ ty }}" stroke="#ffcd4a" opacity=".45" stroke-dasharray="4 4"/>{% when None %}{% endmatch %}
+        {% for bar in chart.bars %}
+        <rect x="{{ bar.x }}" y="{{ bar.y }}" width="{{ bar.width }}" height="{{ bar.height }}" rx="2" {% if bar.is_partial %}fill="rgba(255,205,74,0.28)" stroke="#ffcd4a" stroke-width="1.2"{% else %}fill="#42b983"{% endif %}><title>{{ bar.tooltip }}</title></rect>
+        {% endfor %}
+        {% if chart.show_weight_line %}<polyline points="{{ chart.weight_line }}" fill="none" stroke="#55aef3" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>{% endif %}
+        {% for wp in chart.weight_points %}
+        <circle cx="{{ wp.x }}" cy="{{ wp.y }}" r="4.5" fill="#55aef3" stroke="#0b2940" stroke-width="1.5"><title>{{ wp.tooltip }}</title></circle>
+        {% endfor %}
+        <text x="48" y="198" text-anchor="start" fill="currentColor" font-size="11">{{ chart.start_label }}</text>
+        <text x="552" y="198" text-anchor="end" fill="currentColor" font-size="11">{{ chart.end_label }}</text>
+      </svg>
+      <p class="food-chart-legend">Green bars = complete logged calories · Amber outlined bars = partial subtotal · Blank days = unlogged (not fasting) · Blue line = recorded body weight (kg)</p>
+    </div>
+    {% else %}
+    <p class="tracker-empty">Log food intake or weights to see the 30-day weight versus calorie chart.</p>
+    {% endif %}
+
+    {% if !trends.food_acceptance.is_empty() %}
+    <div class="vet-table-scroll">
+      <table class="vet-marker-table">
+        <caption>Food acceptance and refusal patterns (last 30 days)</caption>
+        <thead><tr><th>Food</th><th>Offered</th><th>Ate all</th><th>Partial</th><th>Refused</th><th>Unknown qty</th><th>Acceptance</th></tr></thead>
+        <tbody>
+          {% for stat in trends.food_acceptance %}
+          <tr>
+            <td>{{ stat.food_name }}</td>
+            <td>{{ stat.times_offered }}</td>
+            <td>{{ stat.consumed_all }}</td>
+            <td>{{ stat.consumed_partial }}</td>
+            <td>{{ stat.refused }}</td>
+            <td>{{ stat.consumed_unknown_amount }}</td>
+            <td>{{ stat.acceptance_label() }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </section>
+
+  {# 6. Recent history across days #}
+  {% if !recent_entries.is_empty() %}
+  <section class="plan-log">
+    <div class="side-label">RECENT HISTORY</div>
+    <h3>Recent feeding entries</h3>
+    <div class="vet-table-scroll">
+      <table class="vet-marker-table">
+        <thead><tr><th>Date</th><th>Food</th><th>Outcome</th><th>Amount</th><th>Calories</th></tr></thead>
+        <tbody>
+          {% for entry in recent_entries %}
+          <tr>
+            <td><a href="/app?pet={{ pet.id }}&amp;view=food&amp;date={{ entry.fed_on }}" hx-get="/app/tab/food?pet={{ pet.id }}&amp;date={{ entry.fed_on }}" hx-target="#tab-body" hx-swap="innerHTML">{{ entry.fed_on }}</a></td>
+            <td>{{ entry.display_food_name() }}</td>
+            <td>{{ entry.intake_status_label() }}</td>
+            <td>{{ entry.amount_label() }}</td>
+            <td>{{ entry.kcal_label() }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endif %}
+
+  {# 7. Household reusable food catalogue #}
+  <section class="plan-log">
+    <div class="side-label">HOUSEHOLD FOOD CATALOGUE</div>
+    <h3>Reusable foods &amp; nutrition profiles</h3>
+    <p>Establish a food’s nutrition once and reuse it across meals. Updating a catalogue food never rewrites historical diary snapshots.</p>
+    <details class="plan-add">
+      <summary><span class="structured-pulse">+</span><span><b>Add a reusable food</b><small>Commercial, prescription diet, treat, supplement, or plain human food</small></span></summary>
+      <form method="post" action="/food/catalogue" hx-post="/food/catalogue" hx-target="#food-tab" hx-swap="outerHTML" class="tracker-form">
+        <input type="hidden" name="pet_id" value="{{ pet.id }}">
+        <input type="hidden" name="selected_date" value="{{ selected_date }}">
+        <label class="full-width">Food name<input required maxlength="140" name="name" placeholder="e.g. Renal Wet Pouch Chicken"></label>
+        <label>Brand <span class="field-hint">optional</span><input maxlength="100" name="brand" placeholder="Royal Canin"></label>
+        <label>Variant <span class="field-hint">optional</span><input maxlength="120" name="variant" placeholder="Loaf in Gravy"></label>
+        <label>Category
+          <select name="category">
+            <option value="commercial_wet">Commercial wet</option>
+            <option value="commercial_dry">Commercial dry</option>
+            <option value="prescription_diet">Veterinary prescription diet</option>
+            <option value="treat">Treat</option>
+            <option value="supplement">Supplement</option>
+            <option value="human_food">Plain human food</option>
+            <option value="custom_prep">Custom preparation</option>
+          </select>
+        </label>
+        <label>Completeness
+          <select name="completeness">
+            <option value="unknown">Unknown</option>
+            <option value="complete">Complete &amp; balanced</option>
+            <option value="complementary">Complementary</option>
+          </select>
+        </label>
+        <label>Serving label <span class="field-hint">optional</span><input maxlength="40" name="serving_label" placeholder="pouch, can, tube, scoop"></label>
+        <label>Serving size <span class="field-hint">optional</span><input type="number" min="0.01" step="0.01" name="serving_size_value" placeholder="85"></label>
+        <label>Serving unit <span class="field-hint">g or ml</span><input maxlength="30" name="serving_size_unit" placeholder="g"></label>
+        <label>Nutrition basis <span class="field-hint">required if entering nutrients</span>
+          <select name="nutrition_basis">
+            <option value="">— Nutrition unknown —</option>
+            <option value="per_100g">Per 100 g (as-fed)</option>
+            <option value="per_100ml">Per 100 ml</option>
+            <option value="per_serving">Per serving</option>
+            <option value="dry_matter">Per 100 g dry matter</option>
+          </select>
+        </label>
+        <label>Energy (kcal per basis)<input type="number" min="0" step="0.1" name="kcal_per_basis" placeholder="95"></label>
+        <label>Protein (g per basis)<input type="number" min="0" step="0.01" name="protein_g" placeholder="7.5"></label>
+        <label>Fat (g per basis)<input type="number" min="0" step="0.01" name="fat_g" placeholder="6.0"></label>
+        <label>Phosphorus (mg per basis)<input type="number" min="0" step="0.1" name="phosphorus_mg" placeholder="90"></label>
+        <label>Sodium (mg per basis)<input type="number" min="0" step="0.1" name="sodium_mg" placeholder="110"></label>
+        <label>Moisture (%)<input type="number" min="0" max="100" step="0.1" name="moisture_pct" placeholder="78"></label>
+        <label>Confidence
+          <select name="nutrition_confidence">
+            <option value="unknown">Unknown</option>
+            <option value="verified">Verified (label / manufacturer)</option>
+            <option value="estimated">Estimated (generic / database)</option>
+          </select>
+        </label>
+        <label class="full-width">Nutrition source <span class="field-hint">optional</span><input maxlength="500" name="nutrition_source" placeholder="e.g. Royal Canin 85g pouch label, USDA FoodData Central"></label>
+        <label class="full-width food-check"><input type="checkbox" name="is_favorite" value="1"> Pin to frequent foods</label>
+        <button class="button primary full-width" type="submit">Add to food catalogue</button>
+      </form>
+    </details>
+    {% if foods.is_empty() %}
+    <p class="tracker-empty">No foods in the household catalogue yet.</p>
+    {% else %}
+    <div class="food-catalogue-list">
+      {% for f in foods %}
+      <article class="food-catalogue-row">
+        <div>
+          <strong>{{ f.display_name() }}</strong>
+          <small>{{ f.category }} · {{ f.completeness }} · {{ f.basis_summary() }} · {{ f.nutrition_confidence }}{% match f.serving_size_value %}{% when Some with (sv) %} · 1 {{ f.serving_label.as_deref().unwrap_or("serving") }} = {{ sv }} {{ f.serving_size_unit.as_deref().unwrap_or("") }}{% when None %}{% endmatch %}</small>
+          {% match f.nutrition_source %}{% when Some with (src) %}<small class="food-source-line">Source: {{ src }}</small>{% when None %}{% endmatch %}
+        </div>
+        <form method="post" action="/food/catalogue/{{ f.id }}/favorite" hx-post="/food/catalogue/{{ f.id }}/favorite" hx-target="#food-tab" hx-swap="outerHTML">
+          <input type="hidden" name="pet_id" value="{{ pet.id }}">
+          <input type="hidden" name="selected_date" value="{{ selected_date }}">
+          <button class="quiet-action" type="submit">{% if f.is_favorite %}★ Pinned{% else %}☆ Pin{% endif %}</button>
+        </form>
+      </article>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </section>
+</section>

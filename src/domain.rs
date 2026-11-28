@@ -342,6 +342,7 @@ pub enum TimelineEntry {
     Weight(WeightEntry),
     Dose(MedicationAdministration),
     Lab(LabReport),
+    Food(crate::nutrition::FoodDiaryEntry),
 }
 
 impl TimelineEntry {
@@ -354,6 +355,7 @@ impl TimelineEntry {
             TimelineEntry::Weight(weight) => (weight.measured_at, weight.id),
             TimelineEntry::Dose(dose) => (dose.administered_at, dose.id),
             TimelineEntry::Lab(lab) => (lab_effective_at(lab), lab.id),
+            TimelineEntry::Food(food) => (food.effective_at(), food.id),
         }
     }
 }

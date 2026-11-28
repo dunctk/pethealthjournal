@@ -420,6 +420,7 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
     db.execute(stmt(crate::insights::MIGRATION_SQL)).await?;
     db.execute(stmt(crate::clinical_cases::MIGRATION_SQL))
         .await?;
+    db.execute(stmt(crate::nutrition::MIGRATION_SQL)).await?;
     db.execute(stmt(
         r#"
         CREATE TABLE IF NOT EXISTS household_subscriptions (
@@ -481,6 +482,13 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
     ensure_google_sub_column(db).await?;
     ensure_column(db, "lab_reports", "original_file", "TEXT").await?;
     ensure_column(db, "lab_results", "parse_status", "TEXT").await?;
+    ensure_column(
+        db,
+        "clinical_case_updates",
+        "linked_food_entry_id",
+        "INTEGER REFERENCES food_diary_entries(id) ON DELETE SET NULL",
+    )
+    .await?;
     ensure_column(db, "pets", "microchip_number", "TEXT").await?;
     db.execute(stmt(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_pets_household_microchip ON pets(household_id, microchip_number) WHERE microchip_number IS NOT NULL",
@@ -1725,10 +1733,22 @@ pub async fn delete_pet(
         .collect::<Result<Vec<_>, _>>()?;
     let mut removed = std::collections::BTreeMap::new();
     // Children before parents so foreign keys hold even with enforcement on.
-    let steps: [(&str, &str); 14] = [
+    let steps: [(&str, &str); 17] = [
         (
             "clinical_cases",
             "DELETE FROM clinical_cases WHERE household_id=? AND pet_id=?",
+        ),
+        (
+            "food_intake_requests",
+            "DELETE FROM food_intake_requests WHERE household_id=? AND pet_id=?",
+        ),
+        (
+            "food_diary_entries",
+            "DELETE FROM food_diary_entries WHERE household_id=? AND pet_id=?",
+        ),
+        (
+            "pet_nutrition_targets",
+            "DELETE FROM pet_nutrition_targets WHERE household_id=? AND pet_id=?",
         ),
         (
             "pet_passports",
@@ -3787,13 +3807,16 @@ pub async fn list_timeline(
     let events = timeline_events_page(db, household_id, pet_id, before, limit).await?;
     let weights = timeline_weights_page(db, household_id, pet_id, before, limit).await?;
     let doses = timeline_doses_page(db, household_id, pet_id, before, limit).await?;
+    let foods =
+        crate::nutrition::timeline_food_page(db, household_id, pet_id, before, limit).await?;
     let labs = list_lab_reports(db, household_id, pet_id).await?;
 
     let mut merged: Vec<TimelineEntry> =
-        Vec::with_capacity(events.len() + weights.len() + doses.len() + labs.len());
+        Vec::with_capacity(events.len() + weights.len() + doses.len() + foods.len() + labs.len());
     merged.extend(events.into_iter().map(TimelineEntry::Event));
     merged.extend(weights.into_iter().map(TimelineEntry::Weight));
     merged.extend(doses.into_iter().map(TimelineEntry::Dose));
+    merged.extend(foods.into_iter().map(TimelineEntry::Food));
     merged.extend(
         labs.into_iter()
             .filter(|report| {
@@ -5148,6 +5171,7 @@ mod tests {
             TimelineEntry::Weight(weight) => weight.id,
             TimelineEntry::Dose(dose) => dose.id,
             TimelineEntry::Lab(lab) => lab.id,
+            TimelineEntry::Food(food) => food.id,
         }
     }
 

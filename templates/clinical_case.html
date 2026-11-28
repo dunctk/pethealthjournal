@@ -18,13 +18,14 @@ pre{white-space:pre-wrap} .notice{border-left:4px solid #d7b66b;padding:12px;bac
 {% if detail.updates.is_empty() %}<p>No case updates recorded yet.</p>{% endif %}
 {% for item in detail.updates %}<article><div class="row"><strong>{{ item.kind }}</strong><small>{% match item.observed_on %}{% when Some with (date) %}Observed {{ date }}{% when None %}Date not established{% endmatch %} · Recorded {{ item.created_at }}</small></div>
 <p>{{ item.original_wording }}</p><small>{% if item.source == "owner_relayed_vet" %}Owner's account of the veterinarian's words{% else %}Owner-reported{% endif %}
-{% match item.linked_event_id %}{% when Some with (id) %} · Linked health event #{{ id }}{% when None %}{% endmatch %}</small></article>{% endfor %}
+{% match item.linked_event_id %}{% when Some with (id) %} · Linked health event #{{ id }}{% when None %}{% endmatch %}{% match item.linked_food_entry_id %}{% when Some with (id) %} · Linked food entry #{{ id }}{% when None %}{% endmatch %}</small></article>{% endfor %}
 <details><summary>+ Add observation, treatment course, outcome, or vet note</summary><form method="post" action="/clinical-cases/{{ detail.investigation.id }}/updates">
 <label>Type<select name="kind"><option value="observation">Symptom / observation</option><option value="treatment">Treatment or medication course</option><option value="response">Response / did it help?</option><option value="vet_finding">Vet finding (as relayed by owner)</option><option value="test">Test / examination</option><option value="question">Question for vet</option></select></label>
 <label>Original wording<textarea name="original_wording" required maxlength="3000" rows="4"></textarea></label>
 <label>Observation date (if known)<input type="date" name="observed_on"></label>
 <label>Who reported this?<select name="source"><option value="owner_reported">Owner</option><option value="owner_relayed_vet">Owner relaying vet</option></select></label>
-<label>Related health event ID (optional)<input type="number" name="linked_event_id" min="1"></label><button type="submit">Add to investigation</button></form></details></section>
+<label>Related health event ID (optional)<input type="number" name="linked_event_id" min="1"></label>
+<label>Related food diary entry ID (optional)<input type="number" name="linked_food_entry_id" min="1"></label><button type="submit">Add to investigation</button></form></details></section>
 <section class="panel"><h2>Possible explanations to discuss</h2><p class="muted">These are hypotheses and questions, not diagnoses. A vet finding is labelled as reported by the owner unless independently verified.</p>
 {% if detail.hypotheses.is_empty() %}<p>No hypotheses noted.</p>{% endif %}
 {% for hypothesis in detail.hypotheses %}<article><div class="row"><strong>{{ hypothesis.label }}</strong><span class="tag">{{ hypothesis.status }}</span></div>

@@ -11,7 +11,8 @@
 ## MCP-first AI and proactive cost policy
 
 - ChatGPT, Claude and other MCP clients handle primary conversations; Rust owns authoritative records and validation. Keep manual web entry accessible.
-- Prefer typed MCP writes and the neutral `record_observation` tool (no extra model call). The legacy `record_health_event` may invoke a second LLM, so don't recommend it for every assistant-generated write.
+- Prefer typed MCP writes (`record_food_intake`, `add_food`, `record_weight`, `record_symptom_event`, `record_medication`, `record_prescription`, etc.) and the neutral `record_observation` tool (no extra model call). The legacy `record_health_event` may invoke a second LLM, so don't recommend it for every assistant-generated write.
+- Food & nutrition diary invariants: never fabricate nutrient values, never silently mix incompatible measurement bases (`per_100g`, `per_100ml`, `per_serving`, `dry_matter`), never rewrite historical diary snapshots when updating catalogue foods, never treat unknown intake as 0 kcal or unlogged days as fasting, and never automatically prescribe calorie or nutrient targets. See `docs/food-nutrition-diary.md`.
 - OCR and photo-vision are separate optional provider integrations with their own costs and privacy considerations.
 - Hosted Free must not run background LLM monitoring. Managed Plus will need consent, server-side **household-level** billing entitlement, spend caps, deduplication and a scheduler. The global managed mode does not grant permission.
 - Self-hosted proactive AI, when actually implemented, will use the operator's own provider key. `PROACTIVE_AI_ENABLED` defaults off and currently provides **configuration validation only, no worker**.

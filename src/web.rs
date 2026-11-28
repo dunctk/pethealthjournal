@@ -28,6 +28,7 @@ pub fn router(state: AppState) -> Router {
         .route("/app", get(index))
         .route("/app/tab/{view}", get(tab_fragment))
         .route("/app/timeline/older", get(timeline_older))
+        .route("/app/forms/food", get(record_form_food))
         .route("/app/forms/weight", get(record_form_weight))
         .route("/app/forms/dose", get(record_form_dose))
         .route("/app/forms/symptom", get(record_form_symptom))
@@ -64,6 +65,17 @@ pub fn router(state: AppState) -> Router {
         .route("/pets", post(create_pet))
         .route("/pets/{id}/microchip", post(update_pet_microchip))
         .route("/weights", post(create_weight))
+        .route("/food/entries", post(create_food_entry_route))
+        .route("/food/entries/{id}/update", post(update_food_entry_route))
+        .route("/food/entries/{id}/delete", post(delete_food_entry_route))
+        .route("/food/entries/{id}/restore", post(restore_food_entry_route))
+        .route("/food/catalogue", post(create_food_catalogue_route))
+        .route(
+            "/food/catalogue/{id}/favorite",
+            post(toggle_food_favorite_route),
+        )
+        .route("/food/targets", post(set_food_target_route))
+        .route("/food/targets/clear", post(clear_food_target_route))
         .route("/symptoms", post(create_symptom))
         .route("/medications", post(create_medication))
         .route("/prescriptions", post(create_prescription))
@@ -933,6 +945,7 @@ async fn change_password(
 struct IndexQuery {
     pet: Option<i64>,
     view: Option<String>,
+    date: Option<String>,
 }
 
 /// Which tab of the console is showing. Phase 1 only: each tab is rendered from
@@ -941,6 +954,7 @@ struct IndexQuery {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConsoleView {
     Timeline,
+    Food,
     Plan,
     Labs,
     Photos,
@@ -952,6 +966,7 @@ impl ConsoleView {
     /// Unknown or missing values fall back to the timeline rather than erroring.
     fn parse(value: Option<&str>) -> Self {
         match value {
+            Some("food") => Self::Food,
             Some("plan") => Self::Plan,
             Some("labs") => Self::Labs,
             Some("photos") => Self::Photos,
@@ -962,6 +977,9 @@ impl ConsoleView {
     }
     fn is_timeline(self) -> bool {
         self == Self::Timeline
+    }
+    fn is_food(self) -> bool {
+        self == Self::Food
     }
     fn is_plan(self) -> bool {
         self == Self::Plan
@@ -981,6 +999,7 @@ impl ConsoleView {
     fn label(self) -> &'static str {
         match self {
             Self::Timeline => "Timeline",
+            Self::Food => "Food",
             Self::Plan => "Plan",
             Self::Labs => "Labs",
             Self::Photos => "Photos",
@@ -991,6 +1010,7 @@ impl ConsoleView {
     fn key(self) -> &'static str {
         match self {
             Self::Timeline => "timeline",
+            Self::Food => "food",
             Self::Plan => "plan",
             Self::Labs => "labs",
             Self::Photos => "photos",
@@ -1125,6 +1145,7 @@ async fn render_tab_from_data(
     pet: &Pet,
     view: ConsoleView,
     data: ConsoleData,
+    selected_date: Option<&str>,
 ) -> Result<String, AppError> {
     let html = match view {
         ConsoleView::Timeline => {
@@ -1150,6 +1171,19 @@ async fn render_tab_from_data(
                 load_more_oob: false,
             }
             .render()?
+        }
+        ConsoleView::Food => {
+            render_food_tab(
+                state,
+                household_id,
+                pet,
+                selected_date,
+                &data.weights,
+                None,
+                None,
+                None,
+            )
+            .await?
         }
         ConsoleView::Plan => {
             let adherence = db::list_adherence(&state.db, household_id, pet.id, 30).await?;
@@ -1231,7 +1265,15 @@ async fn index(
             .count();
         assistant_html =
             render_assistant_workbench(pet, view, "record", Vec::new(), None, None, None)?;
-        tab_html = render_tab_from_data(&state, user.household_id, pet, view, data).await?;
+        tab_html = render_tab_from_data(
+            &state,
+            user.household_id,
+            pet,
+            view,
+            data,
+            query.date.as_deref(),
+        )
+        .await?;
     }
     render(&ConsoleTemplate {
         user,
@@ -1264,7 +1306,15 @@ async fn tab_fragment(
         .ok_or_else(AppError::not_found)?;
     let view = ConsoleView::parse(Some(&view));
     let data = load_console_data(&state, user.household_id, pet.id).await?;
-    let html = render_tab_from_data(&state, user.household_id, &pet, view, data).await?;
+    let html = render_tab_from_data(
+        &state,
+        user.household_id,
+        &pet,
+        view,
+        data,
+        query.date.as_deref(),
+    )
+    .await?;
     Ok(Html(html))
 }
 
@@ -1307,6 +1357,732 @@ fn standalone_or_fragment(
             body,
         })
     }
+}
+
+async fn record_form_food(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    Query(query): Query<PetQuery>,
+    headers: HeaderMap,
+) -> Result<Html<String>, AppError> {
+    let pet = db::get_pet(&state.db, user.household_id, query.pet)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    let foods =
+        crate::nutrition::list_foods(&state.db, user.household_id, None, None, false, false, 100)
+            .await?;
+    let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+    let body = FormFoodTemplate {
+        pet: pet.clone(),
+        foods,
+        today,
+    }
+    .render()?;
+    standalone_or_fragment(&headers, "Log food or meal", &pet, body)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn render_food_tab(
+    state: &AppState,
+    household_id: i64,
+    pet: &Pet,
+    selected_date: Option<&str>,
+    weights: &[WeightEntry],
+    notice: Option<String>,
+    error_msg: Option<String>,
+    undo_entry_id: Option<i64>,
+) -> Result<String, AppError> {
+    let today = Utc::now().date_naive();
+    let day = selected_date
+        .and_then(|raw| NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d").ok())
+        .filter(|d| *d <= today + chrono::Duration::days(1))
+        .unwrap_or(today);
+    let selected_str = day.format("%Y-%m-%d").to_string();
+    let prev_date = (day - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let next_date = (day + chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let is_today = day >= today;
+
+    let day_page = crate::nutrition::list_food_entries(
+        &state.db,
+        household_id,
+        pet.id,
+        crate::nutrition::FoodEntryFilter {
+            since: Some(selected_str.clone()),
+            until: Some(selected_str.clone()),
+            limit: 100,
+            ..Default::default()
+        },
+    )
+    .await?;
+    let recent_page = crate::nutrition::list_food_entries(
+        &state.db,
+        household_id,
+        pet.id,
+        crate::nutrition::FoodEntryFilter {
+            limit: 20,
+            ..Default::default()
+        },
+    )
+    .await?;
+    let active_target =
+        crate::nutrition::get_active_target(&state.db, household_id, pet.id).await?;
+    let day_summary =
+        crate::nutrition::summarize_day(&selected_str, &day_page.items, active_target.as_ref());
+    let trends = crate::nutrition::load_trend_report(
+        &state.db,
+        household_id,
+        pet.id,
+        day - chrono::Duration::days(29),
+        day,
+    )
+    .await?;
+    let chart = crate::nutrition::build_weight_calorie_chart(
+        &trends.daily,
+        weights,
+        active_target.as_ref(),
+    );
+    let foods =
+        crate::nutrition::list_foods(&state.db, household_id, None, None, false, false, 150)
+            .await?;
+    let frequent_foods =
+        crate::nutrition::list_frequent_foods(&state.db, household_id, pet.id, 6).await?;
+
+    Ok(TabFoodTemplate {
+        pet: pet.clone(),
+        selected_date: selected_str,
+        prev_date,
+        next_date,
+        is_today,
+        day_summary,
+        day_entries: day_page.items,
+        recent_entries: recent_page.items,
+        trends,
+        chart,
+        foods,
+        frequent_foods,
+        active_target,
+        notice,
+        error_msg,
+        undo_entry_id,
+    }
+    .render()?)
+}
+
+fn food_tab_response(
+    headers: &HeaderMap,
+    pet_id: i64,
+    selected_date: &str,
+    redirect_to_tab: bool,
+    html: String,
+) -> Response {
+    if wants_fragment(headers) && !redirect_to_tab {
+        Html(html).into_response()
+    } else {
+        Redirect::to(&format!(
+            "/app?pet={pet_id}&view=food&date={}",
+            urlencoding::encode(selected_date)
+        ))
+        .into_response()
+    }
+}
+
+#[derive(Deserialize)]
+struct FoodEntryForm {
+    pet_id: i64,
+    #[serde(default)]
+    selected_date: Option<String>,
+    #[serde(default)]
+    redirect_to_tab: Option<String>,
+    #[serde(default, deserialize_with = "empty_str_as_none")]
+    food_item_id: Option<i64>,
+    #[serde(default)]
+    food_name: Option<String>,
+    intake_status: String,
+    #[serde(default)]
+    appetite: Option<String>,
+    #[serde(default, deserialize_with = "empty_str_as_none")]
+    offered_amount: Option<f64>,
+    #[serde(default)]
+    offered_unit: Option<String>,
+    #[serde(default, deserialize_with = "empty_str_as_none")]
+    consumed_amount: Option<f64>,
+    #[serde(default)]
+    consumed_unit: Option<String>,
+    #[serde(default)]
+    is_approximate: Option<String>,
+    #[serde(default)]
+    fed_on: Option<String>,
+    #[serde(default)]
+    meal_label: Option<String>,
+    #[serde(default)]
+    preparation: Option<String>,
+    #[serde(default)]
+    original_wording: Option<String>,
+}
+
+async fn create_food_entry_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    headers: HeaderMap,
+    Form(form): Form<FoodEntryForm>,
+) -> Result<Response, AppError> {
+    let pet = db::get_pet(&state.db, user.household_id, form.pet_id)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+    let fed_on = form
+        .fed_on
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&today)
+        .to_owned();
+    let selected_date = form
+        .selected_date
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&fed_on)
+        .to_owned();
+    let food_name_clean = clean_optional(form.food_name.as_deref(), 140).map(ToOwned::to_owned);
+    let fallback_wording = if let Some(ref name) = food_name_clean {
+        format!("{}: {}", form.intake_status, name)
+    } else {
+        format!("Logged feeding ({})", form.intake_status)
+    };
+    let wording = clean_optional(form.original_wording.as_deref(), 2000)
+        .map(ToOwned::to_owned)
+        .unwrap_or(fallback_wording);
+    let inline_snapshot = if form.food_item_id.is_none() {
+        food_name_clean.map(|food_name| crate::nutrition::NutritionSnapshot {
+            food_name,
+            nutrition_confidence: "unknown".into(),
+            ..Default::default()
+        })
+    } else {
+        None
+    };
+    let item = crate::nutrition::NewFoodIntakeItem {
+        food_item_id: form.food_item_id,
+        inline_snapshot,
+        intake_status: form.intake_status.clone(),
+        appetite: clean_optional(form.appetite.as_deref(), 30).map(ToOwned::to_owned),
+        offered_amount: form.offered_amount,
+        offered_unit: clean_optional(form.offered_unit.as_deref(), 40).map(ToOwned::to_owned),
+        consumed_amount: form.consumed_amount,
+        consumed_unit: clean_optional(form.consumed_unit.as_deref(), 40).map(ToOwned::to_owned),
+        is_approximate: form.is_approximate.is_some(),
+        preparation: clean_optional(form.preparation.as_deref(), 200).map(ToOwned::to_owned),
+        original_wording: wording,
+        notes: None,
+    };
+    let now_rfc3339 = Utc::now().to_rfc3339();
+    let (fed_at, precision) = if fed_on == today {
+        (Some(now_rfc3339.as_str()), "recorded")
+    } else {
+        (None, "date_only")
+    };
+    let outcome = crate::nutrition::record_meal_entries(
+        &state.db,
+        user.household_id,
+        pet.id,
+        &user.audit_actor(),
+        "manual_web",
+        &fed_on,
+        fed_at,
+        precision,
+        clean_optional(form.meal_label.as_deref(), 40),
+        None,
+        vec![item],
+    )
+    .await;
+    let weights = db::list_weights(&state.db, user.household_id, pet.id).await?;
+    let (notice, err) = match outcome {
+        Ok(res) => (
+            Some(format!(
+                "Recorded {} for {}.",
+                res.entries
+                    .first()
+                    .map(|e| e.display_food_name())
+                    .unwrap_or_else(|| "feeding".into()),
+                fed_on
+            )),
+            None,
+        ),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    let html = render_food_tab(
+        &state,
+        user.household_id,
+        &pet,
+        Some(&selected_date),
+        &weights,
+        notice,
+        err,
+        None,
+    )
+    .await?;
+    Ok(food_tab_response(
+        &headers,
+        pet.id,
+        &selected_date,
+        form.redirect_to_tab.is_some(),
+        html,
+    ))
+}
+
+#[derive(Deserialize)]
+struct FoodEntryUpdateForm {
+    pet_id: i64,
+    #[serde(default)]
+    selected_date: Option<String>,
+    intake_status: String,
+    #[serde(default)]
+    appetite: Option<String>,
+    #[serde(default, deserialize_with = "empty_str_as_none")]
+    consumed_amount: Option<f64>,
+    #[serde(default)]
+    consumed_unit: Option<String>,
+    fed_on: String,
+    #[serde(default)]
+    meal_label: Option<String>,
+    original_wording: String,
+}
+
+async fn update_food_entry_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<FoodEntryUpdateForm>,
+) -> Result<Response, AppError> {
+    let pet = db::get_pet(&state.db, user.household_id, form.pet_id)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    let selected_date = form
+        .selected_date
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(&form.fed_on)
+        .to_owned();
+    let patch = crate::nutrition::FoodIntakePatch {
+        intake_status: Some(form.intake_status),
+        appetite: Some(clean_optional(form.appetite.as_deref(), 30).map(ToOwned::to_owned)),
+        consumed_amount: Some(form.consumed_amount),
+        consumed_unit: Some(
+            clean_optional(form.consumed_unit.as_deref(), 40).map(ToOwned::to_owned),
+        ),
+        fed_on: Some(form.fed_on),
+        meal_label: Some(clean_optional(form.meal_label.as_deref(), 40).map(ToOwned::to_owned)),
+        original_wording: Some(form.original_wording),
+        ..Default::default()
+    };
+    let outcome = crate::nutrition::update_food_entry(
+        &state.db,
+        user.household_id,
+        &user.audit_actor(),
+        id,
+        patch,
+    )
+    .await;
+    let (notice, err) = match outcome {
+        Ok(Some(_)) => (Some("Feeding entry updated.".into()), None),
+        Ok(None) => (None, Some("Feeding entry not found.".into())),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    let weights = db::list_weights(&state.db, user.household_id, pet.id).await?;
+    let html = render_food_tab(
+        &state,
+        user.household_id,
+        &pet,
+        Some(&selected_date),
+        &weights,
+        notice,
+        err,
+        None,
+    )
+    .await?;
+    Ok(food_tab_response(
+        &headers,
+        pet.id,
+        &selected_date,
+        false,
+        html,
+    ))
+}
+
+#[derive(Deserialize)]
+struct FoodTabActionForm {
+    pet_id: i64,
+    #[serde(default)]
+    selected_date: Option<String>,
+}
+
+async fn delete_food_entry_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<FoodTabActionForm>,
+) -> Result<Response, AppError> {
+    let pet = db::get_pet(&state.db, user.household_id, form.pet_id)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    let selected_date = form
+        .selected_date
+        .unwrap_or_else(|| Utc::now().date_naive().format("%Y-%m-%d").to_string());
+    let deleted =
+        crate::nutrition::delete_food_entry(&state.db, user.household_id, &user.audit_actor(), id)
+            .await?;
+    let (notice, undo_id) = match deleted {
+        Some(entry) => (
+            Some(format!("Removed '{}'.", entry.display_food_name())),
+            Some(entry.id),
+        ),
+        None => (Some("Entry was already removed.".into()), None),
+    };
+    let weights = db::list_weights(&state.db, user.household_id, pet.id).await?;
+    let html = render_food_tab(
+        &state,
+        user.household_id,
+        &pet,
+        Some(&selected_date),
+        &weights,
+        notice,
+        None,
+        undo_id,
+    )
+    .await?;
+    Ok(food_tab_response(
+        &headers,
+        pet.id,
+        &selected_date,
+        false,
+        html,
+    ))
+}
+
+async fn restore_food_entry_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<FoodTabActionForm>,
+) -> Result<Response, AppError> {
+    let pet = db::get_pet(&state.db, user.household_id, form.pet_id)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    let selected_date = form
+        .selected_date
+        .unwrap_or_else(|| Utc::now().date_naive().format("%Y-%m-%d").to_string());
+    let restored =
+        crate::nutrition::restore_food_entry(&state.db, user.household_id, &user.audit_actor(), id)
+            .await?;
+    let notice = match restored {
+        Some(entry) => Some(format!("Restored '{}'.", entry.display_food_name())),
+        None => Some("Entry could not be restored.".into()),
+    };
+    let weights = db::list_weights(&state.db, user.household_id, pet.id).await?;
+    let html = render_food_tab(
+        &state,
+        user.household_id,
+        &pet,
+        Some(&selected_date),
+        &weights,
+        notice,
+        None,
+        None,
+    )
+    .await?;
+    Ok(food_tab_response(
+        &headers,
+        pet.id,
+        &selected_date,
+        false,
+        html,
+    ))
+}
+
+#[derive(Deserialize)]
+struct FoodCatalogueForm {
+    pet_id: i64,
+    #[serde(default)]
+    selected_date: Option<String>,
+    name: String,
+    #[serde(default)]
+    brand: Option<String>,
+    #[serde(default)]
+    variant: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    completeness: Option<String>,
+    #[serde(default)]
+    serving_label: Option<String>,
+    #[serde(default, deserialize_with = "empty_str_as_none")]
+    serving_size_value: Option<f64>,
+    #[serde(default)]
+    serving_size_unit: Option<String>,
+    #[serde(default)]
+    nutrition_basis: Option<String>,
+    #[serde(default, deserialize_with = "empty_str_as_none")]
+    kcal_per_basis: Option<f64>,
+    #[serde(default, deserialize_with = "empty_str_as_none")]
+    protein_g: Option<f64>,
+    #[serde(default, deserialize_with = "empty_str_as_none")]
+    fat_g: Option<f64>,
+    #[serde(default, deserialize_with = "empty_str_as_none")]
+    phosphorus_mg: Option<f64>,
+    #[serde(default, deserialize_with = "empty_str_as_none")]
+    sodium_mg: Option<f64>,
+    #[serde(default, deserialize_with = "empty_str_as_none")]
+    moisture_pct: Option<f64>,
+    #[serde(default)]
+    nutrition_confidence: Option<String>,
+    #[serde(default)]
+    nutrition_source: Option<String>,
+    #[serde(default)]
+    is_favorite: Option<String>,
+}
+
+async fn create_food_catalogue_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    headers: HeaderMap,
+    Form(form): Form<FoodCatalogueForm>,
+) -> Result<Response, AppError> {
+    let pet = db::get_pet(&state.db, user.household_id, form.pet_id)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    let selected_date = form
+        .selected_date
+        .unwrap_or_else(|| Utc::now().date_naive().format("%Y-%m-%d").to_string());
+    let input = crate::nutrition::NewFoodItem {
+        name: form.name,
+        brand: clean_optional(form.brand.as_deref(), 100).map(ToOwned::to_owned),
+        variant: clean_optional(form.variant.as_deref(), 120).map(ToOwned::to_owned),
+        category: clean_optional(form.category.as_deref(), 40)
+            .unwrap_or("commercial_wet")
+            .to_owned(),
+        food_form: None,
+        completeness: clean_optional(form.completeness.as_deref(), 30)
+            .unwrap_or("unknown")
+            .to_owned(),
+        serving_size_value: form.serving_size_value,
+        serving_size_unit: clean_optional(form.serving_size_unit.as_deref(), 30)
+            .map(ToOwned::to_owned),
+        serving_label: clean_optional(form.serving_label.as_deref(), 40).map(ToOwned::to_owned),
+        nutrition_basis: clean_optional(form.nutrition_basis.as_deref(), 30).map(ToOwned::to_owned),
+        kcal_per_basis: form.kcal_per_basis,
+        protein_g: form.protein_g,
+        fat_g: form.fat_g,
+        phosphorus_mg: form.phosphorus_mg,
+        sodium_mg: form.sodium_mg,
+        moisture_pct: form.moisture_pct,
+        nutrition_confidence: clean_optional(form.nutrition_confidence.as_deref(), 30)
+            .unwrap_or("")
+            .to_owned(),
+        nutrition_source: clean_optional(form.nutrition_source.as_deref(), 500)
+            .map(ToOwned::to_owned),
+        notes: None,
+        is_favorite: form.is_favorite.is_some(),
+    };
+    let (notice, err) = match crate::nutrition::create_food(
+        &state.db,
+        user.household_id,
+        &user.audit_actor(),
+        input,
+    )
+    .await
+    {
+        Ok(food) => (
+            Some(format!(
+                "Added '{}' to household food catalogue.",
+                food.display_name()
+            )),
+            None,
+        ),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    let weights = db::list_weights(&state.db, user.household_id, pet.id).await?;
+    let html = render_food_tab(
+        &state,
+        user.household_id,
+        &pet,
+        Some(&selected_date),
+        &weights,
+        notice,
+        err,
+        None,
+    )
+    .await?;
+    Ok(food_tab_response(
+        &headers,
+        pet.id,
+        &selected_date,
+        false,
+        html,
+    ))
+}
+
+async fn toggle_food_favorite_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<FoodTabActionForm>,
+) -> Result<Response, AppError> {
+    let pet = db::get_pet(&state.db, user.household_id, form.pet_id)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    let selected_date = form
+        .selected_date
+        .unwrap_or_else(|| Utc::now().date_naive().format("%Y-%m-%d").to_string());
+    if let Some(existing) = crate::nutrition::get_food(&state.db, user.household_id, id).await? {
+        let patch = crate::nutrition::FoodItemPatch {
+            is_favorite: Some(!existing.is_favorite),
+            ..Default::default()
+        };
+        crate::nutrition::update_food(&state.db, user.household_id, &user.audit_actor(), id, patch)
+            .await?;
+    }
+    let weights = db::list_weights(&state.db, user.household_id, pet.id).await?;
+    let html = render_food_tab(
+        &state,
+        user.household_id,
+        &pet,
+        Some(&selected_date),
+        &weights,
+        None,
+        None,
+        None,
+    )
+    .await?;
+    Ok(food_tab_response(
+        &headers,
+        pet.id,
+        &selected_date,
+        false,
+        html,
+    ))
+}
+
+#[derive(Deserialize)]
+struct FoodTargetForm {
+    pet_id: i64,
+    #[serde(default)]
+    selected_date: Option<String>,
+    #[serde(default, deserialize_with = "empty_str_as_none")]
+    daily_kcal_min: Option<f64>,
+    #[serde(default, deserialize_with = "empty_str_as_none")]
+    daily_kcal_max: Option<f64>,
+    #[serde(default, deserialize_with = "empty_str_as_none")]
+    daily_phosphorus_mg_max: Option<f64>,
+    #[serde(default, deserialize_with = "empty_str_as_none")]
+    daily_sodium_mg_max: Option<f64>,
+    source: String,
+    source_note: String,
+    #[serde(default)]
+    effective_from: Option<String>,
+}
+
+async fn set_food_target_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    headers: HeaderMap,
+    Form(form): Form<FoodTargetForm>,
+) -> Result<Response, AppError> {
+    let pet = db::get_pet(&state.db, user.household_id, form.pet_id)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    let selected_date = form
+        .selected_date
+        .unwrap_or_else(|| Utc::now().date_naive().format("%Y-%m-%d").to_string());
+    let input = crate::nutrition::NewNutritionTarget {
+        daily_kcal_min: form.daily_kcal_min,
+        daily_kcal_max: form.daily_kcal_max,
+        daily_phosphorus_mg_max: form.daily_phosphorus_mg_max,
+        daily_sodium_mg_max: form.daily_sodium_mg_max,
+        source: form.source,
+        source_note: form.source_note,
+        effective_from: clean_optional(form.effective_from.as_deref(), 20).map(ToOwned::to_owned),
+        ..Default::default()
+    };
+    let (notice, err) = match crate::nutrition::set_nutrition_target(
+        &state.db,
+        user.household_id,
+        pet.id,
+        &user.audit_actor(),
+        input,
+    )
+    .await
+    {
+        Ok(_) => (Some("Saved owner/vet nutrition target.".into()), None),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    let weights = db::list_weights(&state.db, user.household_id, pet.id).await?;
+    let html = render_food_tab(
+        &state,
+        user.household_id,
+        &pet,
+        Some(&selected_date),
+        &weights,
+        notice,
+        err,
+        None,
+    )
+    .await?;
+    Ok(food_tab_response(
+        &headers,
+        pet.id,
+        &selected_date,
+        false,
+        html,
+    ))
+}
+
+async fn clear_food_target_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    headers: HeaderMap,
+    Form(form): Form<FoodTabActionForm>,
+) -> Result<Response, AppError> {
+    let pet = db::get_pet(&state.db, user.household_id, form.pet_id)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    let selected_date = form
+        .selected_date
+        .unwrap_or_else(|| Utc::now().date_naive().format("%Y-%m-%d").to_string());
+    crate::nutrition::clear_nutrition_target(
+        &state.db,
+        user.household_id,
+        pet.id,
+        &user.audit_actor(),
+    )
+    .await?;
+    let weights = db::list_weights(&state.db, user.household_id, pet.id).await?;
+    let html = render_food_tab(
+        &state,
+        user.household_id,
+        &pet,
+        Some(&selected_date),
+        &weights,
+        Some("Cleared active nutrition target.".into()),
+        None,
+        None,
+    )
+    .await?;
+    Ok(food_tab_response(
+        &headers,
+        pet.id,
+        &selected_date,
+        false,
+        html,
+    ))
 }
 
 /// `GET /app/forms/weight` — `+ Record → Weight`. Household-scoped via
@@ -2458,7 +3234,8 @@ async fn confirm_agent_medication_plan(
         .filter(|item| item.status == "active")
         .count();
     let tab_refresh = if view.is_plan() {
-        let tab_html = render_tab_from_data(&state, user.household_id, &pet, view, data).await?;
+        let tab_html =
+            render_tab_from_data(&state, user.household_id, &pet, view, data, None).await?;
         Some(as_refresh_template(
             "tab-refresh",
             format!(r#"<div id="tab-body" class="tab-body">{tab_html}</div>"#),
@@ -2589,7 +3366,8 @@ async fn confirm_agent_medication_plan_stop(
         .filter(|item| item.status == "active")
         .count();
     let tab_refresh = if view.is_plan() {
-        let tab_html = render_tab_from_data(&state, user.household_id, &pet, view, data).await?;
+        let tab_html =
+            render_tab_from_data(&state, user.household_id, &pet, view, data, None).await?;
         Some(as_refresh_template(
             "tab-refresh",
             format!(r#"<div id="tab-body" class="tab-body">{tab_html}</div>"#),
@@ -3078,6 +3856,22 @@ fn chat_context(pet: &Pet, entries: &[TimelineEntry]) -> (String, Vec<AssistantE
                     href: Some(format!("/app?pet={}&view=labs", pet.id)),
                 });
             }
+            TimelineEntry::Food(food) => {
+                lines.push(format!(
+                    "{} | food | {} | {} | {} | {} | original wording: {}",
+                    food.fed_on,
+                    food.display_food_name(),
+                    food.intake_status_label(),
+                    food.amount_label(),
+                    food.kcal_label(),
+                    food.original_wording
+                ));
+                evidence.push(AssistantEvidence {
+                    label: food.display_food_name(),
+                    detail: food.fed_on.clone(),
+                    href: Some(format!("/app?pet={}&view=food", pet.id)),
+                });
+            }
         }
     }
     (lines.join("\n"), evidence.into_iter().take(6).collect())
@@ -3164,6 +3958,12 @@ fn fallback_chat_reply(
             TimelineEntry::Lab(lab) => format!(
                 "Lab report ({})",
                 lab.test_date.as_deref().unwrap_or("date unavailable")
+            ),
+            TimelineEntry::Food(food) => format!(
+                "Food: {} — {} ({})",
+                food.display_food_name(),
+                food.intake_status_label(),
+                food.fed_on
             ),
         })
         .collect::<Vec<_>>();
@@ -3374,6 +4174,21 @@ async fn shared_pet(
     }
     let timeline = crate::vet_share::build_timeline(entries, &cases);
     let charts = crate::vet_share::charts(&lab_reports);
+    let weights = db::list_weights(&state.db, grant.household_id, pet.id).await?;
+    let today = Utc::now().date_naive();
+    let nutrition = crate::nutrition::load_trend_report(
+        &state.db,
+        grant.household_id,
+        pet.id,
+        today - chrono::Duration::days(29),
+        today,
+    )
+    .await?;
+    let nutrition_chart = crate::nutrition::build_weight_calorie_chart(
+        &nutrition.daily,
+        &weights,
+        nutrition.active_target.as_ref(),
+    );
     render(&SharedPetTemplate {
         grant,
         pet,
@@ -3382,6 +4197,8 @@ async fn shared_pet(
         charts,
         cases,
         prescriptions,
+        nutrition,
+        nutrition_chart,
     })
 }
 
@@ -4039,6 +4856,35 @@ struct StandaloneTemplate {
 }
 
 #[derive(Template)]
+#[template(path = "_tab_food.html")]
+struct TabFoodTemplate {
+    pet: Pet,
+    selected_date: String,
+    prev_date: String,
+    next_date: String,
+    is_today: bool,
+    day_summary: crate::nutrition::DailyNutritionSummary,
+    day_entries: Vec<crate::nutrition::FoodDiaryEntry>,
+    recent_entries: Vec<crate::nutrition::FoodDiaryEntry>,
+    trends: crate::nutrition::NutritionTrendReport,
+    chart: crate::nutrition::WeightCalorieChart,
+    foods: Vec<crate::nutrition::FoodItem>,
+    frequent_foods: Vec<crate::nutrition::FoodItem>,
+    active_target: Option<crate::nutrition::NutritionTarget>,
+    notice: Option<String>,
+    error_msg: Option<String>,
+    undo_entry_id: Option<i64>,
+}
+
+#[derive(Template)]
+#[template(path = "_form_food.html")]
+struct FormFoodTemplate {
+    pet: Pet,
+    foods: Vec<crate::nutrition::FoodItem>,
+    today: String,
+}
+
+#[derive(Template)]
 #[template(path = "_form_weight.html")]
 struct FormWeightTemplate {
     pet: Pet,
@@ -4166,6 +5012,8 @@ struct SharedPetTemplate {
     charts: Vec<crate::vet_share::MarkerChart>,
     cases: Vec<crate::clinical_cases::CaseDetail>,
     prescriptions: Vec<MedicationPrescription>,
+    nutrition: crate::nutrition::NutritionTrendReport,
+    nutrition_chart: crate::nutrition::WeightCalorieChart,
 }
 
 #[derive(Debug)]
