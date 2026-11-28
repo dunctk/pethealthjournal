@@ -180,11 +180,130 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
         .ok(
             &owner,
             "update_pet",
-            json!({"pet_id":pet_id,"breed":"Tabby","date_of_birth":"2019-04-01"}),
+            json!({"pet_id":pet_id,"breed":"Tabby","date_of_birth":"2019-04-01","microchip_number":"009123456789012"}),
         )
         .await;
     assert_eq!(updated["pet"]["breed"], "Tabby");
+    assert_eq!(updated["pet"]["microchip_number"], "009123456789012");
+    let pets = h.ok(&owner, "list_pets", json!({})).await;
+    assert_eq!(pets["items"][0]["microchip_number"], "009123456789012");
+    let invalid = h
+        .err(
+            &owner,
+            "update_pet",
+            json!({"pet_id":pet_id,"microchip_number":123456789012345_i64}),
+        )
+        .await;
+    assert!(invalid.contains("must be a string"));
+    let invalid = h
+        .err(
+            &owner,
+            "update_pet",
+            json!({"pet_id":pet_id,"microchip_number":"123XYZ"}),
+        )
+        .await;
+    assert!(invalid.contains("9 to 20 digits"));
+    let second_id = h
+        .ok(&owner, "add_pet", json!({"name":"Other","species":"Cat"}))
+        .await["pet_id"]
+        .as_i64()
+        .unwrap();
+    let duplicate = h
+        .err(
+            &owner,
+            "update_pet",
+            json!({"pet_id":second_id,"microchip_number":"009123456789012"}),
+        )
+        .await;
+    assert!(duplicate.contains("microchip number"));
+    h.ok(
+        &owner,
+        "update_pet",
+        json!({"pet_id":pet_id,"microchip_number":""}),
+    )
+    .await;
+    let updated = h
+        .ok(
+            &owner,
+            "update_pet",
+            json!({"pet_id":pet_id,"microchip_number":"009123456789012"}),
+        )
+        .await;
+    assert_eq!(updated["pet"]["microchip_number"], "009123456789012");
     h.err(&owner, "update_pet", json!({"pet_id":pet_id})).await;
+
+    // Private passport scans: storage and tenant isolation.
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.4\n%%EOF");
+    let saved = h
+        .ok(
+            &owner,
+            "add_pet_passport",
+            json!({"pet_id":pet_id,"filename":"Identity.pdf","label":"Identity","content_base64":encoded}),
+        )
+        .await;
+    let passport_id = saved["passport_id"].as_i64().unwrap();
+    let docs = h
+        .ok(&owner, "list_pet_passports", json!({"pet_id":pet_id}))
+        .await;
+    assert_eq!(docs["items"][0]["passport_id"], passport_id);
+    assert_eq!(docs["items"][0]["label"], "Identity");
+    assert_eq!(docs["items"][0]["authentication_required"], true);
+    assert!(
+        h.err(&stranger, "list_pet_passports", json!({"pet_id":pet_id}))
+            .await
+            .contains("not in this household")
+    );
+    assert!(
+        h.err(
+            &stranger,
+            "add_pet_passport",
+            json!({"pet_id":pet_id,"content_base64":encoded})
+        )
+        .await
+        .contains("not in this household")
+    );
+    assert!(h.err(&owner, "add_pet_passport", json!({"pet_id":pet_id,"content_base64":base64::engine::general_purpose::STANDARD.encode(b"bad document")})).await.contains("PDF, JPEG, PNG or WebP"));
+    assert!(
+        h.err(
+            &owner,
+            "delete_pet_passport",
+            json!({"passport_id":passport_id,"confirm":false})
+        )
+        .await
+        .contains("confirm")
+    );
+    assert!(
+        h.err(
+            &stranger,
+            "delete_pet_passport",
+            json!({"passport_id":passport_id,"confirm":true})
+        )
+        .await
+        .contains("not in this household")
+    );
+    let removed = h
+        .ok(
+            &owner,
+            "delete_pet_passport",
+            json!({"passport_id":passport_id,"confirm":true}),
+        )
+        .await;
+    assert_eq!(removed["deleted"], true);
+    assert_eq!(
+        h.ok(&owner, "list_pet_passports", json!({"pet_id":pet_id}))
+            .await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    h.ok(
+        &owner,
+        "add_pet_passport",
+        json!({"pet_id":pet_id,"filename":"Rabies.pdf","content_base64":encoded}),
+    )
+    .await;
 
     // Isolation: another household sees nothing and cannot act.
     let theirs = h.ok(&stranger, "list_pets", json!({})).await;
@@ -269,6 +388,53 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
         .ok(&owner, "get_medication_plan", json!({"pet_id":pet_id}))
         .await;
     assert!(plan.to_string().contains("0.5"));
+    // Owner-reported current medicines are compared read-only; no regimen
+    // changes unless the owner separately approves update_prescription.
+    let review = h
+        .ok(
+            &owner,
+            "review_medication_plan",
+            json!({
+                "pet_id":pet_id,
+                "reported_current_medicines":["Doxybactin"],
+            }),
+        )
+        .await;
+    assert_eq!(review["needs_owner_review"], true);
+    assert_eq!(
+        review["possible_stale_active_prescriptions"][0]["name"],
+        "Semintra"
+    );
+    assert_eq!(
+        review["reported_medicines_missing_from_active_plan"][0],
+        "Doxybactin"
+    );
+    let stop = h
+        .ok(
+            &owner,
+            "update_prescription",
+            json!({
+                "pet_id":pet_id,
+                "prescription_id":change["current_prescription_id"],
+                "action":"stop",
+                "message":"Owner says discontinued previously, actual date unknown",
+                "confirm":true
+            }),
+        )
+        .await;
+    assert_eq!(stop["new_status"], "stopped");
+    let stopped_plan = h
+        .ok(&owner, "get_medication_plan", json!({"pet_id":pet_id}))
+        .await;
+    let id = change["current_prescription_id"].as_i64().unwrap();
+    let stopped = stopped_plan["prescriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"].as_i64() == Some(id))
+        .unwrap();
+    assert_eq!(stopped["status"], "stopped");
+    assert!(stopped["ended_on"].is_null());
     h.ok(&owner, "get_clinical_timeline", json!({"pet_id":pet_id}))
         .await;
 
@@ -338,7 +504,28 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
     let url = share["url"].as_str().unwrap();
     assert!(url.starts_with("http://app.test/share/"), "{url}");
     let path = url.trim_start_matches("http://app.test");
-    assert_eq!(h.get(path).await.0, StatusCode::OK);
+    let (share_status, share_body) = h.get(path).await;
+    assert_eq!(share_status, StatusCode::OK);
+    assert!(share_body.contains("id=\"clinical-timeline\""));
+    assert!(share_body.contains("id=\"blood-markers\""));
+    assert!(share_body.contains("vet-timeline-entry"));
+    assert!(
+        share_body.contains("vet-chart"),
+        "blood markers should render an SVG chart"
+    );
+    assert!(
+        share_body.contains("Creatinine"),
+        "lab analyte aliases should be unified"
+    );
+    assert!(share_body.contains("Prescription history"));
+    assert!(
+        !share_body.contains("009123456789012"),
+        "private microchip must not be exposed"
+    );
+    assert!(
+        !share_body.contains("href=\"/passports/"),
+        "passports must not be shared"
+    );
     let listed_shares = h.ok(&owner, "list_vet_shares", json!({})).await;
     assert_eq!(listed_shares["shares"][0]["status"], "active");
     assert!(
@@ -360,6 +547,130 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
     .await;
     assert_ne!(h.get(path).await.0, StatusCode::OK);
 
+    // An owner can investigate unresolved symptoms without the assistant diagnosing.
+    let case_opened = h
+        .ok(
+            &owner,
+            "open_clinical_case",
+            json!({
+                "pet_id":pet_id,"title":"Persistent upper respiratory signs",
+                "presenting_concern":"Intermittent noisy breathing reported by owner"
+            }),
+        )
+        .await;
+    let case_id = case_opened["case_id"].as_i64().unwrap();
+    let cases = h
+        .ok(&owner, "list_clinical_cases", json!({"pet_id":pet_id}))
+        .await;
+    assert_eq!(cases["investigations"][0]["id"], case_id);
+    h.err(&stranger, "get_clinical_case", json!({"case_id":case_id}))
+        .await;
+    let observation = h
+        .ok(
+            &owner,
+            "add_clinical_case_update",
+            json!({
+                "case_id":case_id,"kind":"observation","original_wording":"Occasional wheezing",
+                "source":"owner_reported"
+            }),
+        )
+        .await;
+    assert!(observation["case_update_id"].as_i64().unwrap() > 0);
+    for (date, wording) in [
+        ("2020-06-01", "Later observation"),
+        ("2019-01-01", "Earlier observation"),
+    ] {
+        h.ok(
+            &owner,
+            "add_clinical_case_update",
+            json!({
+                "case_id":case_id,"kind":"observation","original_wording":wording,
+                "observed_on":date,"source":"owner_reported"
+            }),
+        )
+        .await;
+    }
+    let hypothesis=h.ok(&owner,"add_clinical_hypothesis",json!({
+        "case_id":case_id,"label":"Could a medication contribute?","reported_by":"owner_question"
+    })).await;
+    let hypothesis_id = hypothesis["hypothesis_id"].as_i64().unwrap();
+    let refused = h
+        .err(
+            &owner,
+            "review_clinical_hypothesis",
+            json!({
+                "case_id":case_id,"hypothesis_id":hypothesis_id,"status":"vet_supported",
+                "rationale":"No vet assessment","reported_by":"owner_question","confirm":true
+            }),
+        )
+        .await;
+    assert!(refused.contains("veterinary assessment"));
+    h.ok(
+        &owner,
+        "review_clinical_hypothesis",
+        json!({
+            "case_id":case_id,"hypothesis_id":hypothesis_id,"status":"under_review",
+            "rationale":"Ask the vet","reported_by":"owner_question","confirm":true
+        }),
+    )
+    .await;
+    let detail = h
+        .ok(&owner, "get_clinical_case", json!({"case_id":case_id}))
+        .await;
+    assert_eq!(
+        detail["updates"][0]["original_wording"],
+        "Earlier observation"
+    );
+    assert_eq!(
+        detail["updates"][1]["original_wording"],
+        "Later observation"
+    );
+    assert_eq!(
+        detail["updates"][2]["original_wording"],
+        "Occasional wheezing"
+    );
+    assert!(detail["updates"][2]["observed_on"].is_null());
+    let brief = h
+        .ok(&owner, "get_vet_case_brief", json!({"case_id":case_id}))
+        .await;
+    assert_eq!(brief["case"]["investigation"]["id"], case_id);
+    h.ok(
+        &owner,
+        "set_clinical_case_status",
+        json!({
+            "case_id":case_id,"status":"monitoring","confirm":true
+        }),
+    )
+    .await;
+    // No case data should be accessible from an unrelated household.
+    h.err(&stranger, "list_clinical_cases", json!({"pet_id":pet_id}))
+        .await;
+    h.err(&stranger, "get_vet_case_brief", json!({"case_id":case_id}))
+        .await;
+
+    // A new share shows investigation entries in the same chronological timeline.
+    let case_share = h
+        .ok(
+            &owner,
+            "create_vet_share",
+            json!({"pet_id":pet_id,"label":"Clinical case review","days":1,"confirm":true}),
+        )
+        .await;
+    let case_url = case_share["url"].as_str().unwrap();
+    let case_path = case_url.trim_start_matches("http://app.test");
+    let (case_status, case_body) = h.get(case_path).await;
+    assert_eq!(case_status, StatusCode::OK);
+    assert!(case_body.contains("Persistent upper respiratory signs"));
+    assert!(case_body.contains("Occasional wheezing"));
+    assert!(case_body.contains(&format!("case-{case_id}-update-")));
+    h.ok(
+        &owner,
+        "revoke_vet_share",
+        json!({"share_id":case_share["share_id"]}),
+    )
+    .await;
+    assert_ne!(h.get(case_path).await.0, StatusCode::OK);
+
     // Deleting a pet requires the exact name, then removes everything.
     let refused = h
         .err(
@@ -377,6 +688,13 @@ async fn every_mcp_tool_works_end_to_end_with_household_isolation() {
         )
         .await;
     assert!(deleted["removed"]["lab_reports"].as_u64().unwrap() >= 2);
+    assert_eq!(deleted["removed"]["pet_passports"], 1);
+    h.ok(
+        &owner,
+        "delete_pet",
+        json!({"pet_id":second_id,"confirm_name":"Other","confirm":true}),
+    )
+    .await;
     let pets = h.ok(&owner, "list_pets", json!({})).await;
     assert_eq!(pets["items"].as_array().unwrap().len(), 0);
 

@@ -1,0 +1,41 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ detail.investigation.title }} · {{ pet.name }}</title><style>
+body{margin:0;background:#10191b;color:#e8efed;font:16px system-ui,sans-serif;line-height:1.5}
+header,main{max-width:1000px;margin:auto;padding:20px} a{color:#b6dfcc}
+h1{font-size:2rem}h2{font-size:1.25rem}
+article,section.panel{background:#1b292b;border:1px solid #34494a;border-radius:12px;padding:20px;margin:16px 0}
+label{display:block;margin:12px 0} input,select,textarea{box-sizing:border-box;width:100%;padding:10px;background:#f4f6f3;color:#172424;border-radius:6px;border:0;font:inherit}
+button,.button{display:inline-block;padding:10px 16px;background:#c4ead8;border:0;border-radius:6px;color:#172424;font:inherit;cursor:pointer}
+small,.muted{color:#b3c2bb} .tag{font-size:.8rem;border:1px solid #77938c;border-radius:6px;padding:3px 7px}
+.row{display:flex;gap:16px;flex-wrap:wrap;align-items:center;justify-content:space-between}
+details{margin:16px 0} summary{cursor:pointer;font-weight:600}
+pre{white-space:pre-wrap} .notice{border-left:4px solid #d7b66b;padding:12px;background:#29302b}
+@media print {body{color:#000;background:#fff} header,main{max-width:none}article,section.panel{border:1px solid #aaa;background:#fff;break-inside:avoid}a,button,form,details{display:none!important}.muted,small{color:#444}}
+</style></head>
+<body><header><a href="/clinical-cases?pet_id={{ pet.id }}">← All {{ pet.name }} investigations</a><h1>{{ detail.investigation.title }}</h1><p>{{ detail.investigation.presenting_concern }}</p><div class="row"><span class="tag">{{ detail.investigation.status }}</span><a class="button" href="/clinical-cases/{{ detail.investigation.id }}/brief">Print / share vet brief</a></div>
+<form method="post" action="/clinical-cases/{{ detail.investigation.id }}/status"><label>Case status <select name="status"><option value="open">Open</option><option value="monitoring">Monitoring</option><option value="resolved">Resolved</option></select></label><button type="submit">Update status</button></form></header>
+<main><p class="notice"><strong>Vet-led care:</strong> This is an evidence and questions log, not an AI diagnosis. Possible explanations are unconfirmed until discussed with your veterinarian. For worsening breathing, seek urgent veterinary attention rather than relying on this page.</p>
+<section class="panel"><h2>Chronological evidence and treatment response</h2>
+{% if detail.updates.is_empty() %}<p>No case updates recorded yet.</p>{% endif %}
+{% for item in detail.updates %}<article><div class="row"><strong>{{ item.kind }}</strong><small>{% match item.observed_on %}{% when Some with (date) %}Observed {{ date }}{% when None %}Date not established{% endmatch %} · Recorded {{ item.created_at }}</small></div>
+<p>{{ item.original_wording }}</p><small>{% if item.source == "owner_relayed_vet" %}Owner's account of the veterinarian's words{% else %}Owner-reported{% endif %}
+{% match item.linked_event_id %}{% when Some with (id) %} · Linked health event #{{ id }}{% when None %}{% endmatch %}</small></article>{% endfor %}
+<details><summary>+ Add observation, treatment course, outcome, or vet note</summary><form method="post" action="/clinical-cases/{{ detail.investigation.id }}/updates">
+<label>Type<select name="kind"><option value="observation">Symptom / observation</option><option value="treatment">Treatment or medication course</option><option value="response">Response / did it help?</option><option value="vet_finding">Vet finding (as relayed by owner)</option><option value="test">Test / examination</option><option value="question">Question for vet</option></select></label>
+<label>Original wording<textarea name="original_wording" required maxlength="3000" rows="4"></textarea></label>
+<label>Observation date (if known)<input type="date" name="observed_on"></label>
+<label>Who reported this?<select name="source"><option value="owner_reported">Owner</option><option value="owner_relayed_vet">Owner relaying vet</option></select></label>
+<label>Related health event ID (optional)<input type="number" name="linked_event_id" min="1"></label><button type="submit">Add to investigation</button></form></details></section>
+<section class="panel"><h2>Possible explanations to discuss</h2><p class="muted">These are hypotheses and questions, not diagnoses. A vet finding is labelled as reported by the owner unless independently verified.</p>
+{% if detail.hypotheses.is_empty() %}<p>No hypotheses noted.</p>{% endif %}
+{% for hypothesis in detail.hypotheses %}<article><div class="row"><strong>{{ hypothesis.label }}</strong><span class="tag">{{ hypothesis.status }}</span></div>
+{% match hypothesis.rationale %}{% when Some with (rationale) %}<p>{{ rationale }}</p>{% when None %}{% endmatch %}
+<small>{% if hypothesis.reported_by == "owner_relayed_vet" %}Owner relaying veterinarian{% else %}Owner's question{% endif %}</small>
+<details><summary>Record vet review / update status</summary><form method="post" action="/clinical-cases/{{ detail.investigation.id }}/hypotheses/{{ hypothesis.id }}/status">
+<label>Status<select name="status"><option value="unreviewed">Unreviewed</option><option value="under_review">Under review</option><option value="less_likely">Less likely</option><option value="ruled_out">Vet reported ruled out</option><option value="vet_supported">Vet reported as supported</option></select></label>
+<label>Explanation (required)<textarea name="rationale" maxlength="2000" required rows="3"></textarea></label>
+<label>Attribution<select name="reported_by"><option value="owner_question">Owner's assessment / question</option><option value="owner_relayed_vet">Owner relaying veterinarian's assessment</option></select></label><button type="submit">Save review</button></form></details></article>{% endfor %}
+<details><summary>+ Add a possible explanation to discuss</summary><form method="post" action="/clinical-cases/{{ detail.investigation.id }}/hypotheses">
+<label>Possible explanation / question<input name="label" required maxlength="200"></label>
+<label>Why consider it? / What evidence is missing?<textarea name="rationale" maxlength="2000" rows="3"></textarea></label>
+<label>Source<select name="reported_by"><option value="owner_question">Owner's question</option><option value="owner_relayed_vet">Owner relaying vet</option></select></label><button type="submit">Add unreviewed hypothesis</button></form></details></section>
+</main></body></html>

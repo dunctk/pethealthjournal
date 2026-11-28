@@ -5,9 +5,9 @@ use crate::{
     domain::{
         ApiTokenInfo, HealthEvent, KnowledgeArticle, LabReport, MedicationAdherence,
         MedicationAdministration, MedicationPlanChange, MedicationPlanStop, MedicationPrescription,
-        Pet, PetPhoto, ShareGrant, TimelineEntry, UserAccount, WeightEntry,
+        Pet, PetPassport, PetPhoto, ShareGrant, TimelineEntry, UserAccount, WeightEntry,
     },
-    ocr, photos,
+    ocr, passports, photos,
 };
 use askama::Template;
 use axum::{
@@ -33,7 +33,36 @@ pub fn router(state: AppState) -> Router {
         .route("/app/forms/symptom", get(record_form_symptom))
         .route("/app/forms/lab", get(record_form_lab))
         .route("/app/events/{id}/drawer", get(event_drawer))
+        .route(
+            "/clinical-cases",
+            get(crate::clinical_cases::list_page).post(crate::clinical_cases::create_form),
+        )
+        .route(
+            "/clinical-cases/{id}",
+            get(crate::clinical_cases::detail_page),
+        )
+        .route(
+            "/clinical-cases/{id}/updates",
+            post(crate::clinical_cases::add_update_form),
+        )
+        .route(
+            "/clinical-cases/{id}/hypotheses",
+            post(crate::clinical_cases::add_hypothesis_form),
+        )
+        .route(
+            "/clinical-cases/{id}/hypotheses/{hypothesis_id}/status",
+            post(crate::clinical_cases::hypothesis_status_form),
+        )
+        .route(
+            "/clinical-cases/{id}/status",
+            post(crate::clinical_cases::case_status_form),
+        )
+        .route(
+            "/clinical-cases/{id}/brief",
+            get(crate::clinical_cases::brief_page),
+        )
         .route("/pets", post(create_pet))
+        .route("/pets/{id}/microchip", post(update_pet_microchip))
         .route("/weights", post(create_weight))
         .route("/symptoms", post(create_symptom))
         .route("/medications", post(create_medication))
@@ -41,6 +70,9 @@ pub fn router(state: AppState) -> Router {
         .route("/medication-adherence", post(create_adherence))
         .route("/blood-tests/upload", post(upload_blood_test))
         .route("/blood-tests/import", post(import_blood_tests))
+        .route("/passports/upload", post(upload_pet_passport))
+        .route("/passports/{id}/file", get(download_pet_passport))
+        .route("/passports/{id}/delete", post(delete_pet_passport_route))
         .route("/photos/upload", post(upload_photo))
         .route("/photos/{id}/image", get(photo_image))
         .route("/blood-tests/{id}/original", get(blood_test_original))
@@ -60,6 +92,22 @@ pub fn router(state: AppState) -> Router {
         .route("/shares", post(create_share))
         .route("/shares/{id}/revoke", post(revoke_share))
         .route("/account", get(account_page))
+        .route(
+            "/account/household",
+            get(crate::invitations::household_page),
+        )
+        .route(
+            "/account/household/invite",
+            post(crate::invitations::send_invite),
+        )
+        .route(
+            "/account/household/invites/{id}/revoke",
+            post(crate::invitations::cancel_invite),
+        )
+        .route(
+            "/account/household/members/{id}/remove",
+            post(crate::invitations::remove_household_member),
+        )
         .route("/account/password", post(change_password))
         .route("/account/api-tokens", post(create_api_token_route))
         .route(
@@ -83,6 +131,11 @@ pub fn router(state: AppState) -> Router {
         .route("/login/code", post(send_login_code))
         .route("/login/code/verify", post(verify_login_code))
         .route("/register", get(register_page).post(register))
+        .route("/invite/{token}", get(crate::invitations::invitation_page))
+        .route(
+            "/invite/{token}/accept",
+            post(crate::invitations::accept_invitation),
+        )
         .route("/oauth/google/start", get(google_start))
         .route("/oauth/google/callback", get(google_callback))
         .route("/share/{token}", get(shared_pet))
@@ -891,6 +944,7 @@ enum ConsoleView {
     Plan,
     Labs,
     Photos,
+    Passports,
     Sharing,
 }
 
@@ -901,6 +955,7 @@ impl ConsoleView {
             Some("plan") => Self::Plan,
             Some("labs") => Self::Labs,
             Some("photos") => Self::Photos,
+            Some("passports") => Self::Passports,
             Some("sharing") => Self::Sharing,
             _ => Self::Timeline,
         }
@@ -920,12 +975,16 @@ impl ConsoleView {
     fn is_sharing(self) -> bool {
         self == Self::Sharing
     }
+    fn is_passports(self) -> bool {
+        self == Self::Passports
+    }
     fn label(self) -> &'static str {
         match self {
             Self::Timeline => "Timeline",
             Self::Plan => "Plan",
             Self::Labs => "Labs",
             Self::Photos => "Photos",
+            Self::Passports => "Passport",
             Self::Sharing => "Sharing",
         }
     }
@@ -935,6 +994,7 @@ impl ConsoleView {
             Self::Plan => "plan",
             Self::Labs => "labs",
             Self::Photos => "photos",
+            Self::Passports => "passports",
             Self::Sharing => "sharing",
         }
     }
@@ -1119,6 +1179,14 @@ async fn render_tab_from_data(
             .render()?
         }
         ConsoleView::Photos => render_photos_tab(state, household_id, pet).await?,
+        ConsoleView::Passports => {
+            let passports = db::list_pet_passports(&state.db, household_id, pet.id).await?;
+            TabPassportsTemplate {
+                pet: pet.clone(),
+                passports,
+            }
+            .render()?
+        }
         ConsoleView::Sharing => TabSharingTemplate {
             pet: pet.clone(),
             shares: data.shares,
@@ -1373,6 +1441,50 @@ async fn create_pet(
 }
 
 #[derive(Deserialize)]
+struct PetMicrochipForm {
+    microchip_number: String,
+}
+
+async fn update_pet_microchip(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    Path(pet_id): Path<i64>,
+    Form(form): Form<PetMicrochipForm>,
+) -> Result<Redirect, AppError> {
+    let number = form.microchip_number.trim();
+    if !number.is_empty() && !crate::domain::valid_microchip_number(number) {
+        return Err(AppError::validation(
+            "Microchip number must contain 9 to 20 digits.",
+        ));
+    }
+    let updated = db::update_pet(
+        &state.db,
+        user.household_id,
+        &user.audit_actor(),
+        pet_id,
+        None,
+        None,
+        None,
+        None,
+        Some(number),
+    )
+    .await
+    .map_err(|error| {
+        if error.to_string().contains("UNIQUE") {
+            AppError::validation(
+                "Another pet in your household already uses that microchip number.",
+            )
+        } else {
+            AppError::from(error)
+        }
+    })?;
+    if !updated {
+        return Err(AppError::not_found());
+    }
+    Ok(Redirect::to(&format!("/app?pet={pet_id}")))
+}
+
+#[derive(Deserialize)]
 struct WeightForm {
     pet_id: i64,
     weight_kg: f64,
@@ -1440,7 +1552,18 @@ async fn create_symptom(
         .await?
         .ok_or_else(AppError::not_found)?;
     let symptom = clean_required(&form.symptom, 60, "Symptom")?;
-    if !matches!(symptom, "vomiting" | "diarrhea" | "reduced_appetite") {
+    if !matches!(
+        symptom,
+        "vomiting"
+            | "diarrhea"
+            | "reduced_appetite"
+            | "wheezing"
+            | "nasal_discharge"
+            | "nasal_congestion"
+            | "eye_discharge"
+            | "coughing"
+            | "labored_breathing"
+    ) {
         return Err(AppError::validation("Choose a supported symptom."));
     }
     let count = form
@@ -1637,6 +1760,141 @@ async fn render_photos_tab(
         default_to_id,
     }
     .render()?)
+}
+
+/// Upload one scan or PDF page of a pet passport. No automatic extraction:
+/// source documents remain authoritative and private.
+async fn upload_pet_passport(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Redirect, AppError> {
+    require_form_origin(&state, &headers)?;
+    let mut pet_id = None;
+    let mut label = None;
+    let mut uploaded = None;
+    while let Some(field) = multipart.next_field().await? {
+        match field.name() {
+            Some("pet_id") => {
+                pet_id = field
+                    .text()
+                    .await
+                    .ok()
+                    .and_then(|text| text.parse::<i64>().ok());
+            }
+            Some("label") => {
+                label = Some(field.text().await?);
+            }
+            Some("file") => {
+                let filename = field.file_name().unwrap_or("pet-passport").to_owned();
+                let bytes = field.bytes().await?.to_vec();
+                uploaded = Some((filename, bytes));
+            }
+            _ => {}
+        }
+    }
+    let pet_id = pet_id.ok_or_else(|| AppError::validation("Select a pet."))?;
+    db::get_pet(&state.db, user.household_id, pet_id)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    let label = label.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    if label.is_some_and(|v| v.chars().count() > 100) {
+        return Err(AppError::validation(
+            "The document label must be under 100 characters.",
+        ));
+    }
+    let (filename, bytes) =
+        uploaded.ok_or_else(|| AppError::validation("Choose a PDF or passport photo."))?;
+    let (path, mime, extension) = passports::store(&state.files, user.household_id, pet_id, &bytes)
+        .await
+        .map_err(|error| AppError::validation(error.to_string()))?;
+    let filename = passports::safe_filename(&filename, extension);
+    if let Err(error) = db::create_pet_passport(
+        &state.db,
+        user.household_id,
+        &user.audit_actor(),
+        pet_id,
+        label,
+        &filename,
+        mime,
+        &path,
+    )
+    .await
+    {
+        passports::remove(&state.files, user.household_id, &path).await;
+        return Err(error.into());
+    }
+    Ok(Redirect::to(&format!("/app?pet={pet_id}&view=passports")))
+}
+
+async fn download_pet_passport(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    Path(passport_id): Path<i64>,
+) -> Result<Response, AppError> {
+    let passport = db::get_pet_passport(&state.db, user.household_id, passport_id)
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    let bytes = state
+        .files
+        .get(&crate::storage::FileKey::Report {
+            household_id: user.household_id,
+            relative: &passport.storage_path,
+        })
+        .await?
+        .ok_or_else(AppError::not_found)?;
+    let extension = match passport.mime_type.as_str() {
+        "application/pdf" => "pdf",
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        _ => return Err(AppError::not_found()),
+    };
+    let mut response = bytes.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&passport.mime_type)
+            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!(
+            "attachment; filename=\"pet-passport.{extension}\""
+        ))
+        .unwrap_or(HeaderValue::from_static("attachment")),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    response.headers_mut().insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok(response)
+}
+
+async fn delete_pet_passport_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserAccount>,
+    headers: HeaderMap,
+    Path(passport_id): Path<i64>,
+) -> Result<Redirect, AppError> {
+    require_form_origin(&state, &headers)?;
+    let removed = db::delete_pet_passport(
+        &state.db,
+        user.household_id,
+        &user.audit_actor(),
+        passport_id,
+    )
+    .await?
+    .ok_or_else(AppError::not_found)?;
+    passports::remove(&state.files, user.household_id, &removed.storage_path).await;
+    Ok(Redirect::to(&format!(
+        "/app?pet={}&view=passports",
+        removed.pet_id
+    )))
 }
 
 async fn upload_photo(
@@ -3092,8 +3350,39 @@ async fn shared_pet(
     let (grant, pet) = db::resolve_share(&state.db, &token)
         .await?
         .ok_or_else(AppError::not_found)?;
-    let events = db::list_events(&state.db, grant.household_id, Some(pet.id), 100).await?;
-    render(&SharedPetTemplate { grant, pet, events })
+    // All private tables are read only after token resolution; this same GET
+    // is checked again on every access, so expiry and revocation apply to all details.
+    const SHARE_TIMELINE_LIMIT: u64 = 400;
+    let entries = db::list_timeline(
+        &state.db,
+        grant.household_id,
+        pet.id,
+        None,
+        SHARE_TIMELINE_LIMIT,
+    )
+    .await?;
+    let lab_reports = db::list_lab_reports(&state.db, grant.household_id, pet.id).await?;
+    let prescriptions = db::list_prescriptions(&state.db, grant.household_id, pet.id, 80).await?;
+    let listed = crate::clinical_cases::list(&state.db, grant.household_id, pet.id).await?;
+    let mut cases = Vec::new();
+    for investigation in listed {
+        if let Some(detail) =
+            crate::clinical_cases::get(&state.db, grant.household_id, investigation.id).await?
+        {
+            cases.push(detail);
+        }
+    }
+    let timeline = crate::vet_share::build_timeline(entries, &cases);
+    let charts = crate::vet_share::charts(&lab_reports);
+    render(&SharedPetTemplate {
+        grant,
+        pet,
+        timeline,
+        timeline_limit: SHARE_TIMELINE_LIMIT,
+        charts,
+        cases,
+        prescriptions,
+    })
 }
 
 async fn css() -> impl IntoResponse {
@@ -3468,6 +3757,10 @@ fn session_cookie(state: &AppState, token: &str, clear: bool) -> HeaderValue {
     .expect("session cookie contains only safe characters")
 }
 
+pub(crate) fn invite_session_redirect(state: &AppState, session: &str) -> Response {
+    session_redirect("/app", session_cookie(state, session, false))
+}
+
 fn session_redirect(location: &str, cookie: HeaderValue) -> Response {
     let mut response = Redirect::to(location).into_response();
     response.headers_mut().insert(header::SET_COOKIE, cookie);
@@ -3517,6 +3810,10 @@ fn same_origin(method: &Method, headers: &HeaderMap) -> bool {
         .and_then(|uri| uri.authority().map(|value| value.as_str().to_owned()));
     host.zip(origin_authority.as_deref())
         .is_some_and(|(host, origin)| host == origin)
+}
+
+pub(crate) fn invite_form_same_origin(state: &AppState, headers: &HeaderMap) -> bool {
+    !state.config.production || same_origin(&Method::POST, headers)
 }
 
 fn require_form_origin(state: &AppState, headers: &HeaderMap) -> Result<(), AppError> {
@@ -3716,6 +4013,13 @@ struct PhotoAnalysisTemplate {
 }
 
 #[derive(Template)]
+#[template(path = "_tab_passports.html")]
+struct TabPassportsTemplate {
+    pet: Pet,
+    passports: Vec<PetPassport>,
+}
+
+#[derive(Template)]
 #[template(path = "_tab_sharing.html")]
 struct TabSharingTemplate {
     pet: Pet,
@@ -3857,7 +4161,11 @@ struct SharesTemplate {
 struct SharedPetTemplate {
     grant: ShareGrant,
     pet: Pet,
-    events: Vec<HealthEvent>,
+    timeline: Vec<crate::vet_share::ShareTimelineItem>,
+    timeline_limit: u64,
+    charts: Vec<crate::vet_share::MarkerChart>,
+    cases: Vec<crate::clinical_cases::CaseDetail>,
+    prescriptions: Vec<MedicationPrescription>,
 }
 
 #[derive(Debug)]

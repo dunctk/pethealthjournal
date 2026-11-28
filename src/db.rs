@@ -113,6 +113,7 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
             species TEXT NOT NULL,
             breed TEXT,
             date_of_birth TEXT,
+            microchip_number TEXT,
             weight_kg REAL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -304,6 +305,18 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_weights_tenant_pet_time
             ON weight_entries(household_id, pet_id, measured_at DESC);
+        CREATE TABLE IF NOT EXISTS pet_passports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            household_id INTEGER NOT NULL REFERENCES households(id),
+            pet_id INTEGER NOT NULL REFERENCES pets(id) ON DELETE CASCADE,
+            label TEXT,
+            filename TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            storage_path TEXT NOT NULL UNIQUE,
+            uploaded_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_passports_household_pet
+            ON pet_passports(household_id, pet_id, uploaded_at DESC);
         CREATE TABLE IF NOT EXISTS pet_photos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             household_id INTEGER NOT NULL,
@@ -405,6 +418,8 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
         "#,))
     .await?;
     db.execute(stmt(crate::insights::MIGRATION_SQL)).await?;
+    db.execute(stmt(crate::clinical_cases::MIGRATION_SQL))
+        .await?;
     db.execute(stmt(
         r#"
         CREATE TABLE IF NOT EXISTS household_subscriptions (
@@ -433,6 +448,19 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
             created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_mcp_tool_calls_time ON mcp_tool_calls(created_at DESC);
+        CREATE TABLE IF NOT EXISTS household_invites (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            household_id INTEGER NOT NULL REFERENCES households(id),
+            invited_by INTEGER NOT NULL REFERENCES users(id),
+            email TEXT NOT NULL COLLATE NOCASE,
+            token_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            accepted_at TEXT,
+            revoked_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_household_invites_pending
+            ON household_invites(household_id, email, expires_at);
         CREATE TABLE IF NOT EXISTS login_codes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT NOT NULL COLLATE NOCASE,
@@ -453,6 +481,11 @@ pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
     ensure_google_sub_column(db).await?;
     ensure_column(db, "lab_reports", "original_file", "TEXT").await?;
     ensure_column(db, "lab_results", "parse_status", "TEXT").await?;
+    ensure_column(db, "pets", "microchip_number", "TEXT").await?;
+    db.execute(stmt(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_pets_household_microchip ON pets(household_id, microchip_number) WHERE microchip_number IS NOT NULL",
+    ))
+    .await?;
 
     let now = Utc::now().to_rfc3339();
     db.execute(Statement::from_sql_and_values(
@@ -1506,7 +1539,7 @@ pub async fn update_password_and_revoke_sessions(
 pub async fn list_pets(db: &DatabaseConnection, household_id: i64) -> anyhow::Result<Vec<Pet>> {
     let rows = db.query_all(Statement::from_sql_and_values(
         DbBackend::Sqlite,
-        "SELECT id,name,species,breed,date_of_birth,weight_kg FROM pets WHERE household_id=? ORDER BY name",
+        "SELECT id,name,species,breed,date_of_birth,microchip_number,weight_kg FROM pets WHERE household_id=? ORDER BY name",
         [household_id.into()],
     )).await?;
     rows.into_iter().map(pet_from_row).collect()
@@ -1519,7 +1552,7 @@ pub async fn get_pet(
 ) -> anyhow::Result<Option<Pet>> {
     db.query_one(Statement::from_sql_and_values(
         DbBackend::Sqlite,
-        "SELECT id,name,species,breed,date_of_birth,weight_kg FROM pets WHERE household_id=? AND id=?",
+        "SELECT id,name,species,breed,date_of_birth,microchip_number,weight_kg FROM pets WHERE household_id=? AND id=?",
         [household_id.into(), id.into()],
     )).await?.map(pet_from_row).transpose()
 }
@@ -1531,7 +1564,7 @@ pub async fn find_pet_by_name(
 ) -> anyhow::Result<Option<Pet>> {
     db.query_one(Statement::from_sql_and_values(
         DbBackend::Sqlite,
-        "SELECT id,name,species,breed,date_of_birth,weight_kg FROM pets WHERE household_id=? AND name=? COLLATE NOCASE",
+        "SELECT id,name,species,breed,date_of_birth,microchip_number,weight_kg FROM pets WHERE household_id=? AND name=? COLLATE NOCASE",
         [household_id.into(), name.into()],
     )).await?.map(pet_from_row).transpose()
 }
@@ -1594,6 +1627,7 @@ pub async fn update_pet(
     species: Option<&str>,
     breed: Option<&str>,
     date_of_birth: Option<&str>,
+    microchip_number: Option<&str>,
 ) -> anyhow::Result<bool> {
     let now = Utc::now().to_rfc3339();
     let transaction = db.begin().await?;
@@ -1605,6 +1639,7 @@ pub async fn update_pet(
                  species=COALESCE(?,species),
                  breed=CASE WHEN ? IS NULL THEN breed ELSE NULLIF(?,'') END,
                  date_of_birth=CASE WHEN ? IS NULL THEN date_of_birth ELSE NULLIF(?,'') END,
+                 microchip_number=CASE WHEN ? IS NULL THEN microchip_number ELSE NULLIF(?,'') END,
                  updated_at=?
                WHERE household_id=? AND id=?"#,
             [
@@ -1614,6 +1649,8 @@ pub async fn update_pet(
                 breed.into(),
                 date_of_birth.into(),
                 date_of_birth.into(),
+                microchip_number.into(),
+                microchip_number.into(),
                 now.clone().into(),
                 household_id.into(),
                 pet_id.into(),
@@ -1624,7 +1661,8 @@ pub async fn update_pet(
         return Ok(false);
     }
     let detail = serde_json::json!({
-        "name": name, "species": species, "breed": breed, "date_of_birth": date_of_birth
+        "name": name, "species": species, "breed": breed, "date_of_birth": date_of_birth,
+        "microchip_changed": microchip_number.is_some()
     })
     .to_string();
     audit(
@@ -1678,8 +1716,8 @@ pub async fn delete_pet(
     let lab_source_files = transaction
         .query_all(Statement::from_sql_and_values(
             DbBackend::Sqlite,
-            "SELECT source_filename AS f FROM lab_reports WHERE household_id=? AND pet_id=? UNION ALL SELECT original_file AS f FROM lab_reports WHERE household_id=? AND pet_id=? AND original_file IS NOT NULL",
-            [household_id.into(), pet_id.into(), household_id.into(), pet_id.into()],
+            "SELECT source_filename AS f FROM lab_reports WHERE household_id=? AND pet_id=? UNION ALL SELECT original_file AS f FROM lab_reports WHERE household_id=? AND pet_id=? AND original_file IS NOT NULL UNION ALL SELECT storage_path AS f FROM pet_passports WHERE household_id=? AND pet_id=?",
+            [household_id.into(), pet_id.into(), household_id.into(), pet_id.into(), household_id.into(), pet_id.into()],
         ))
         .await?
         .into_iter()
@@ -1687,7 +1725,15 @@ pub async fn delete_pet(
         .collect::<Result<Vec<_>, _>>()?;
     let mut removed = std::collections::BTreeMap::new();
     // Children before parents so foreign keys hold even with enforcement on.
-    let steps: [(&str, &str); 12] = [
+    let steps: [(&str, &str); 14] = [
+        (
+            "clinical_cases",
+            "DELETE FROM clinical_cases WHERE household_id=? AND pet_id=?",
+        ),
+        (
+            "pet_passports",
+            "DELETE FROM pet_passports WHERE household_id=? AND pet_id=?",
+        ),
         (
             "lab_results",
             "DELETE FROM lab_results WHERE report_id IN (SELECT id FROM lab_reports WHERE household_id=? AND pet_id=?)",
@@ -1819,6 +1865,135 @@ pub async fn delete_weight(
     .await?;
     transaction.commit().await?;
     Ok(Some(serde_json::from_str(&snapshot)?))
+}
+
+pub async fn create_pet_passport(
+    db: &DatabaseConnection,
+    household_id: i64,
+    actor: &str,
+    pet_id: i64,
+    label: Option<&str>,
+    filename: &str,
+    mime_type: &str,
+    storage_path: &str,
+) -> anyhow::Result<i64> {
+    let now = Utc::now().to_rfc3339();
+    let tx = db.begin().await?;
+    let row = tx
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO pet_passports(household_id,pet_id,label,filename,mime_type,storage_path,uploaded_at) SELECT ?,?,?,?,?,?,? FROM pets WHERE id=? AND household_id=? RETURNING id",
+            [
+                household_id.into(),
+                pet_id.into(),
+                label.into(),
+                filename.into(),
+                mime_type.into(),
+                storage_path.into(),
+                now.clone().into(),
+                pet_id.into(),
+                household_id.into(),
+            ],
+        ))
+        .await?
+        .ok_or_else(|| anyhow!("pet does not belong to household"))?;
+    let id: i64 = row.try_get("", "id")?;
+    audit(
+        &tx,
+        household_id,
+        actor,
+        "passport.created",
+        "pet_passport",
+        id,
+        "Private passport document uploaded",
+        &now,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+fn pet_passport_from_row(row: QueryResult) -> anyhow::Result<crate::domain::PetPassport> {
+    Ok(crate::domain::PetPassport {
+        id: row.try_get("", "id")?,
+        household_id: row.try_get("", "household_id")?,
+        pet_id: row.try_get("", "pet_id")?,
+        label: row.try_get("", "label")?,
+        filename: row.try_get("", "filename")?,
+        mime_type: row.try_get("", "mime_type")?,
+        storage_path: row.try_get("", "storage_path")?,
+        uploaded_at: row.try_get("", "uploaded_at")?,
+    })
+}
+
+pub async fn list_pet_passports(
+    db: &DatabaseConnection,
+    household_id: i64,
+    pet_id: i64,
+) -> anyhow::Result<Vec<crate::domain::PetPassport>> {
+    let rows = db
+        .query_all(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT id,household_id,pet_id,label,filename,mime_type,storage_path,uploaded_at FROM pet_passports WHERE household_id=? AND pet_id=? ORDER BY uploaded_at DESC,id DESC LIMIT 100",
+            [household_id.into(), pet_id.into()],
+        ))
+        .await?;
+    rows.into_iter().map(pet_passport_from_row).collect()
+}
+
+pub async fn get_pet_passport(
+    db: &DatabaseConnection,
+    household_id: i64,
+    passport_id: i64,
+) -> anyhow::Result<Option<crate::domain::PetPassport>> {
+    db.query_one(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "SELECT id,household_id,pet_id,label,filename,mime_type,storage_path,uploaded_at FROM pet_passports WHERE household_id=? AND id=?",
+        [household_id.into(), passport_id.into()],
+    ))
+    .await?
+    .map(pet_passport_from_row)
+    .transpose()
+}
+
+pub async fn delete_pet_passport(
+    db: &DatabaseConnection,
+    household_id: i64,
+    actor: &str,
+    passport_id: i64,
+) -> anyhow::Result<Option<crate::domain::PetPassport>> {
+    let tx = db.begin().await?;
+    let found = tx
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT id,household_id,pet_id,label,filename,mime_type,storage_path,uploaded_at FROM pet_passports WHERE household_id=? AND id=?",
+            [household_id.into(), passport_id.into()],
+        ))
+        .await?
+        .map(pet_passport_from_row)
+        .transpose()?;
+    let Some(passport) = found else {
+        return Ok(None);
+    };
+    tx.execute(Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "DELETE FROM pet_passports WHERE household_id=? AND id=?",
+        [household_id.into(), passport_id.into()],
+    ))
+    .await?;
+    audit(
+        &tx,
+        household_id,
+        actor,
+        "passport.deleted",
+        "pet_passport",
+        passport_id,
+        "Private passport document deleted",
+        &Utc::now().to_rfc3339(),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Some(passport))
 }
 
 pub async fn create_pet_photo(
@@ -2412,6 +2587,12 @@ fn symptom_summary(symptom: &str) -> &str {
         "vomiting" => "Vomited",
         "diarrhea" => "Had diarrhea",
         "reduced_appetite" => "Reduced appetite",
+        "wheezing" => "Wheezing",
+        "nasal_discharge" => "Nasal discharge",
+        "eye_discharge" => "Eye discharge",
+        "nasal_congestion" => "Nasal congestion",
+        "coughing" => "Coughing",
+        "labored_breathing" => "Breathing difficulty",
         _ => "Symptom recorded",
     }
 }
@@ -2909,11 +3090,12 @@ pub async fn confirm_medication_plan_stop(
 }
 
 /// An owner-confirmed change to one existing prescription, requested by an
-/// MCP client. Dates are server-computed from relative day offsets.
+/// MCP client. Known dates are server-computed from relative day offsets.
+/// None means the actual effective date was not supplied, not that it was today.
 #[derive(Clone, Debug)]
 pub enum PrescriptionChange {
     Stop {
-        ended_on: NaiveDate,
+        ended_on: Option<NaiveDate>,
     },
     Pause,
     Resume,
@@ -2924,7 +3106,7 @@ pub enum PrescriptionChange {
         concentration_value: Option<f64>,
         concentration_unit: Option<String>,
         instructions: Option<String>,
-        effective_on: NaiveDate,
+        effective_on: Option<NaiveDate>,
     },
 }
 
@@ -2976,7 +3158,7 @@ pub async fn update_prescription(
     let (new_status, ended_on, concept, summary, occurred_on) = match change {
         PrescriptionChange::Stop { ended_on } => (
             "stopped",
-            Some(ended_on.to_string()),
+            ended_on.map(|day| day.to_string()),
             "medication_plan_stop",
             format!("Stopped {}", current.name),
             *ended_on,
@@ -2986,18 +3168,18 @@ pub async fn update_prescription(
             None,
             "medication_plan_pause",
             format!("Paused {}", current.name),
-            now.date_naive(),
+            Some(now.date_naive()),
         ),
         PrescriptionChange::Resume => (
             "active",
             None,
             "medication_plan_resume",
             format!("Resumed {}", current.name),
-            now.date_naive(),
+            Some(now.date_naive()),
         ),
         PrescriptionChange::ChangeDose { effective_on, .. } => (
             "stopped",
-            Some(effective_on.to_string()),
+            effective_on.map(|day| day.to_string()),
             "medication_plan_change",
             String::new(),
             *effective_on,
@@ -3073,7 +3255,7 @@ pub async fn update_prescription(
                     frequency.clone().into(),
                     current.route.clone().into(),
                     instructions.clone().or(current.instructions.clone()).into(),
-                    effective_on.to_string().into(),
+                    effective_on.map(|day| day.to_string()).into(),
                     "active".into(),
                     raw_input.into(),
                     now_text.clone().into(),
@@ -3103,14 +3285,28 @@ pub async fn update_prescription(
         result_status = "active".into();
     }
 
-    let occurred_at = if occurred_on == now.date_naive() {
-        now_text.clone()
-    } else {
-        occurred_on
-            .and_hms_opt(12, 0, 0)
-            .ok_or_else(|| anyhow!("invalid date"))?
-            .and_utc()
-            .to_rfc3339()
+    // A record made today does not prove that an older treatment stopped
+    // today. For unknown onset dates, preserve the recorded timestamp but
+    // label its temporal precision so timelines/vet exports do not invent one.
+    let (occurred_at, temporal_precision, event_details) = match occurred_on {
+        None => (
+            now_text.clone(),
+            "recorded_only",
+            "Owner-confirmed prescription update; actual effective date unknown.",
+        ),
+        Some(day) if day == now.date_naive() => (
+            now_text.clone(),
+            "confirmed_now",
+            "Owner-confirmed prescription update via MCP.",
+        ),
+        Some(day) => (
+            day.and_hms_opt(12, 0, 0)
+                .ok_or_else(|| anyhow!("invalid date"))?
+                .and_utc()
+                .to_rfc3339(),
+            "day",
+            "Owner-confirmed prescription update via MCP.",
+        ),
     };
     let event_row = transaction
         .query_one(Statement::from_sql_and_values(
@@ -3125,10 +3321,10 @@ pub async fn update_prescription(
                 concept.into(),
                 summary.into(),
                 raw_input.into(),
-                "Owner-confirmed prescription update via MCP.".into(),
+                event_details.into(),
                 occurred_at.into(),
                 now_text.clone().into(),
-                (if occurred_on == now.date_naive() { "confirmed_now" } else { "day" }).into(),
+                temporal_precision.into(),
                 "mcp".into(),
             ],
         ))
@@ -3876,6 +4072,7 @@ pub async fn resolve_share(
         species: row.try_get("", "species")?,
         breed: row.try_get("", "breed")?,
         date_of_birth: row.try_get("", "date_of_birth")?,
+        microchip_number: None, // Vet shares intentionally omit household-only identifiers.
         weight_kg: row.try_get("", "weight_kg")?,
         initials: initials(&row.try_get::<String>("", "pet_name")?),
     };
@@ -3926,6 +4123,7 @@ fn pet_from_row(row: QueryResult) -> anyhow::Result<Pet> {
         species: row.try_get("", "species")?,
         breed: row.try_get("", "breed")?,
         date_of_birth: row.try_get("", "date_of_birth")?,
+        microchip_number: row.try_get("", "microchip_number")?,
         weight_kg: row.try_get("", "weight_kg")?,
     })
 }
@@ -4226,7 +4424,7 @@ mod tests {
                 concentration_value: None,
                 concentration_unit: None,
                 instructions: None,
-                effective_on: today,
+                effective_on: Some(today),
             },
             "Vet upped it to 0.5 ml",
         )
@@ -4251,6 +4449,50 @@ mod tests {
         assert_eq!(new.concentration_value, Some(4.0));
         assert_eq!(new.route.as_deref(), Some("oral"));
 
+        // A confirmed historical stop with no reliable effective date must
+        // leave ended_on NULL, and its event must be recorded_only.
+        let unknown_stop = update_prescription(
+            &db,
+            1,
+            "user:1",
+            &pet,
+            changed.current_prescription_id,
+            "active",
+            &PrescriptionChange::Stop { ended_on: None },
+            "It stopped some time ago; exact date unknown",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let stopped = get_prescription(&db, 1, pet_id, unknown_stop.current_prescription_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stopped.status, "stopped");
+        assert_eq!(stopped.ended_on, None);
+        let event = get_event(&db, 1, pet_id, unknown_stop.event_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let precision_row = db
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT temporal_precision FROM health_events WHERE id=? AND household_id=?",
+                [unknown_stop.event_id.into(), 1_i64.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let precision: String = precision_row.try_get("", "temporal_precision").unwrap();
+        assert_eq!(precision, "recorded_only");
+        assert!(
+            event
+                .details
+                .as_deref()
+                .unwrap_or("")
+                .contains("date unknown")
+        );
+
         // Another household cannot touch it.
         assert!(
             update_prescription(
@@ -4260,7 +4502,9 @@ mod tests {
                 &pet,
                 changed.current_prescription_id,
                 "active",
-                &PrescriptionChange::Stop { ended_on: today },
+                &PrescriptionChange::Stop {
+                    ended_on: Some(today)
+                },
                 "x"
             )
             .await

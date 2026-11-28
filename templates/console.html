@@ -69,6 +69,17 @@
           <div id="record-dialog-slot" class="record-dialog-slot"></div>
         </dialog>
       </section>
+      <p><a class="button secondary" href="/clinical-cases?pet_id={{ pet.id }}">Clinical investigations / vet case briefs</a></p>
+      <details class="pet-microchip">
+        <summary>Microchip: {% match pet.microchip_number %}{% when Some with (number) %}<strong>{{ number }}</strong>{% when None %}<span>Not recorded</span>{% endmatch %} <span class="pet-microchip-action">Edit</span></summary>
+        <form method="post" action="/pets/{{ pet.id }}/microchip" class="stack-form">
+          <label>Microchip number
+            <input type="text" name="microchip_number" inputmode="numeric" autocomplete="off" pattern="[0-9]{9,20}" maxlength="20" placeholder="Usually 15 digits" value="{% match pet.microchip_number %}{% when Some with (number) %}{{ number }}{% when None %}{% endmatch %}">
+          </label>
+          <p>Digits only. Leave blank to clear an incorrect number. Visible only to signed-in household members, not on vet-share pages.</p>
+          <button class="button primary" type="submit">Save microchip</button>
+        </form>
+      </details>
       <section class="metrics" aria-label="Health summary">
         {% include "_events_metric.html" %}
         {% include "_latest_weight_metric.html" %}
@@ -80,6 +91,7 @@
         <a class="tab-link {% if view.is_plan() %}active{% endif %}" {% if view.is_plan() %}aria-current="page"{% endif %} href="/app?pet={{ pet.id }}&amp;view=plan" hx-get="/app/tab/plan?pet={{ pet.id }}" hx-target="#tab-body" hx-swap="innerHTML" hx-push-url="/app?pet={{ pet.id }}&amp;view=plan">Plan</a>
         <a class="tab-link {% if view.is_labs() %}active{% endif %}" {% if view.is_labs() %}aria-current="page"{% endif %} href="/app?pet={{ pet.id }}&amp;view=labs" hx-get="/app/tab/labs?pet={{ pet.id }}" hx-target="#tab-body" hx-swap="innerHTML" hx-push-url="/app?pet={{ pet.id }}&amp;view=labs">Labs</a>
         <a class="tab-link {% if view.is_photos() %}active{% endif %}" {% if view.is_photos() %}aria-current="page"{% endif %} href="/app?pet={{ pet.id }}&amp;view=photos" hx-get="/app/tab/photos?pet={{ pet.id }}" hx-target="#tab-body" hx-swap="innerHTML" hx-push-url="/app?pet={{ pet.id }}&amp;view=photos">Photos</a>
+        <a class="tab-link {% if view.is_passports() %}active{% endif %}" {% if view.is_passports() %}aria-current="page"{% endif %} href="/app?pet={{ pet.id }}&amp;view=passports" hx-get="/app/tab/passports?pet={{ pet.id }}" hx-target="#tab-body" hx-swap="innerHTML" hx-push-url="/app?pet={{ pet.id }}&amp;view=passports">Passport</a>
         <a class="tab-link {% if view.is_sharing() %}active{% endif %}" {% if view.is_sharing() %}aria-current="page"{% endif %} href="/app?pet={{ pet.id }}&amp;view=sharing" hx-get="/app/tab/sharing?pet={{ pet.id }}" hx-target="#tab-body" hx-swap="innerHTML" hx-push-url="/app?pet={{ pet.id }}&amp;view=sharing">Sharing</a>
       </nav>
       {{ assistant_html|safe }}

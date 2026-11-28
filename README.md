@@ -10,6 +10,18 @@ The first complete workflow is intentionally direct:
 
 The application also creates expiring, revocable, read-only vet links. Share tokens are stored only as SHA-256 hashes and are displayed to the owner once.
 
+## Clinical investigations
+
+Track unresolved problems across symptoms, treatments, responses, vet findings and open questions without conflating hypotheses with diagnoses. Open Clinical investigations on the pet dashboard or use MCP tools such as open_clinical_case, add_clinical_case_update, add_clinical_hypothesis and get_vet_case_brief. Existing expiring, revocable vet-share pages include case summaries. See [documentation](docs/clinical-investigations.md).
+
+## Medication history and owner-reviewed reconciliation
+
+The active prescription list is **not** inferred from health notes. When an owner reports that the current medicines differ from the structured plan, MCP clients should call `review_medication_plan` with the owner-confirmed medicine names. It compares exact names and returns **possible** stale active prescriptions and missing current medicines. The tool is read-only; name variants, dose and timing must still be reviewed. To apply a change, call `update_prescription` for each prescription after explicit owner approval.
+
+For `update_prescription`, `effective_days_ago` is optional on `stop` and `change_dose`. **Omit it if the actual stop/change date is unknown**. To explicitly record that the change took effect today, pass `effective_days_ago: 0`; otherwise supply a verified relative date. An unknown date is stored as `NULL` in `ended_on`/`started_on`; the timeline event is labelled `recorded_only` so its timestamp is not misrepresented as the date treatment changed. Historical prescriptions and original owner wording remain intact. Already-incorrect legacy dates require separate source review; this change does not retroactively reinterpret them.
+
+Treatment attempts, symptom responses and owner-relayed vet interpretations belong in the existing clinical-investigation updates until the planned first-class treatment-course model is delivered. Do not infer dosage, causation, or a diagnosis from chronological proximity.
+
 ## Proactive AI and model costs
 
 **Roadmap only:** proactive monitoring is not running today. Future deterministic checks can calculate weight changes, event frequencies and similar measurable patterns without an LLM. Scheduled AI summaries would be optional, bounded and evidence-backed, never a diagnosis or emergency-monitoring guarantee.
@@ -29,6 +41,12 @@ Each pet has a private **Photos** tab for quick appearance tracking. On a phone,
 When `OPENROUTER_API_KEY` or `LLM_API_KEY` is configured, the app asks the configured vision-capable model to locate both eyes in the background. The browser then uses those normalized eye coordinates to rotate, scale, and translate each image onto the same canvas, making it easier to step through changes without the face jumping around between frames. If the eyes cannot be found, the original framing is still shown.
 
 For two-date comparisons, the owner can select any two photos and request a cautious AI visual comparison. The prompt explicitly separates visible changes from pose, distance, expression, fur, and lighting differences and does not ask the model to diagnose a condition or attribute a change to medication. Image inputs are sent as private base64 data rather than public photo URLs.
+
+## Pet passports
+
+Each pet's private **Passport** tab stores a PDF of its passport or separate page scans (JPEG, PNG, WebP), up to 15 MB per file, with optional page labels. Downloads require an authenticated household session; the files are stored through the existing private `FileStore` (local `BLOOD_TESTS_DIR` or configured S3/R2). They do not appear in public vet-share links. No OCR or AI extraction runs when saving passports.
+
+MCP agents can use `list_pet_passports`, `add_pet_passport` (ChatGPT file attachment or `content_base64` for API clients), and `delete_pet_passport` with explicit user confirmation. Never put real passport scans in repository fixtures or logs. A scan is a backup, not a substitute for the physical document or evidence of travel eligibility.
 
 ## Weights and blood tests
 
@@ -57,6 +75,16 @@ claude mcp add --transport http pethealth https://your-host/mcp
 For Codex, add the same URL as a remote MCP server. The client can discover the OAuth endpoints and ask the user to approve access. Keep write actions enabled only for users who should be able to change the household record.
 
 If the client is running over SSH without a display, use the device-code fallback: the client posts its PKCE challenge to `/oauth/device`, prints the returned `user_code`, and polls `/oauth/token` with the returned `device_code`. Open the returned `verification_uri` on any phone or computer, enter the code, sign in, and approve. The code expires after 10 minutes and can be used once.
+
+## Shared households and passwordless invitations
+
+Household owners can open **Account settings → Manage household** to invite another person by email. Invitations expire after seven days and can only be accepted once. Visiting or previewing a link does not use it; the recipient explicitly clicks **Accept invitation and sign in**. The app creates a separate member identity in the *same household*, sets an HttpOnly, SameSite=Lax session cookie (Secure in production), and opens the shared pet dashboard. Later sign-ins use email codes or configured Google login rather than a shared password.
+
+- Configure outbound SMTP and EMAIL_FROM, and set APP_BASE_URL to the externally accessible HTTPS application origin before sending invitations. The app refuses to email authentication links with an unconfigured origin or a non-HTTPS production origin.
+- Owners can revoke pending invitations and remove members. Removing a member invalidates their sessions, personal MCP tokens and OAuth grants without deleting household pet records. Audit events record joins and removals.
+- Every member separately authorizes their preferred MCP client through /mcp using the existing OAuth consent. Compatibility with the consumer Gemini app depends on Google's current availability and MCP support.
+- Invite links are secrets: stored only as hashes, never listed in account settings, and never consumed on GET, so email preview scanners cannot claim the invitation.
+- Existing accounts cannot silently be transferred between households. Such moves currently require administrator-assisted migration rather than a standard invite.
 
 ## Run locally
 

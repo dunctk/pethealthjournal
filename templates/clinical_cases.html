@@ -1,0 +1,21 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ pet.name }} · Clinical investigations</title><style>
+body{margin:0;background:#10191b;color:#e8efed;font:16px system-ui,sans-serif;line-height:1.5}
+header,main{max-width:1000px;margin:auto;padding:20px} a{color:#b6dfcc}
+h1{font-size:2rem}h2{font-size:1.25rem}
+article,section.panel{background:#1b292b;border:1px solid #34494a;border-radius:12px;padding:20px;margin:16px 0}
+label{display:block;margin:12px 0} input,select,textarea{box-sizing:border-box;width:100%;padding:10px;background:#f4f6f3;color:#172424;border-radius:6px;border:0;font:inherit}
+button,.button{display:inline-block;padding:10px 16px;background:#c4ead8;border:0;border-radius:6px;color:#172424;font:inherit;cursor:pointer}
+small,.muted{color:#b3c2bb} .tag{font-size:.8rem;border:1px solid #77938c;border-radius:6px;padding:3px 7px}
+.row{display:flex;gap:16px;flex-wrap:wrap;align-items:center;justify-content:space-between}
+details{margin:16px 0} summary{cursor:pointer;font-weight:600}
+pre{white-space:pre-wrap} .notice{border-left:4px solid #d7b66b;padding:12px;background:#29302b}
+@media print {body{color:#000;background:#fff} header,main{max-width:none}article,section.panel{border:1px solid #aaa;background:#fff;break-inside:avoid}a,button,form,details{display:none!important}.muted,small{color:#444}}
+</style></head>
+<body><header><a href="/app?pet={{ pet.id }}">← {{ pet.name }}'s record</a><h1>Clinical investigations</h1><p>Track unresolved concerns with your vet. These notes are not diagnoses, treatment advice, or an emergency monitoring service.</p></header>
+<main><section class="panel"><h2>Open a new investigation</h2><form method="post" action="/clinical-cases">
+<input type="hidden" name="pet_id" value="{{ pet.id }}"><label>Problem name<input name="title" required maxlength="120" placeholder="Ongoing breathing concern"></label>
+<label>What is happening, in your own words<textarea name="presenting_concern" required maxlength="2000" rows="4"></textarea></label><button type="submit">Create investigation</button></form></section>
+<h2>Existing investigations</h2>
+{% if investigations.is_empty() %}<p>No investigations yet.</p>{% endif %}
+{% for item in investigations %}<article><div class="row"><a href="/clinical-cases/{{ item.id }}"><strong>{{ item.title }}</strong></a><span class="tag">{{ item.status }}</span></div><p>{{ item.presenting_concern }}</p><small>Updated {{ item.updated_at }}</small></article>{% endfor %}
+</main></body></html>

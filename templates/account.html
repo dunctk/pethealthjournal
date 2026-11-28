@@ -14,8 +14,9 @@
     <section class="settings-grid">
       <div class="identity-panel">
         <span class="avatar large">{{ user.initials }}</span><div><h2>{{ user.display_name }}</h2><p>{% match user.email %}{% when Some with (email) %}{{ email }}{% when None %}@{{ user.username }}{% endmatch %}</p></div>
-        <dl><div><dt>Account</dt><dd>Household owner</dd></div><div><dt>Records</dt><dd>Your household only</dd></div></dl>
+        <dl><div><dt>Account</dt><dd>Shared household</dd></div><div><dt>Records</dt><dd>Your household only</dd></div></dl>
       </div>
+      <section class="auth-panel settings-panel"><h2>Household members</h2><p>Invite others to share your pets and connect their own AI assistants.</p><a class="button primary" href="/account/household">Manage household</a></section>
       <section class="auth-panel settings-panel" aria-labelledby="password-title">
         <h2 id="password-title">Change password</h2><p>Changing your password signs out all devices, including this one.</p>
         {% match error %}{% when Some with (message) %}<div class="auth-error" role="alert">{{ message }}</div>{% when None %}{% endmatch %}

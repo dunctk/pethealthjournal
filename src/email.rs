@@ -85,6 +85,16 @@ impl Mailer {
     }
 }
 
+pub fn household_invite_email(to: &str, link: &str) -> OutgoingEmail {
+    OutgoingEmail {
+        to: to.to_owned(),
+        subject: "Invitation to join a Pet Health Journal household".into(),
+        text: format!(
+            "You have been invited to share a household's pet records on Pet Health Journal.\n\n             Open this link to review and accept the invitation:\n\n{link}\n\n             The link expires after seven days and can be used once. Opening it             alone will not create an account; you must press Accept.\n\n             If you did not expect this invitation, ignore this email.\n\nPet Health Journal"
+        ),
+    }
+}
+
 pub fn login_code_email(to: &str, code: &str) -> OutgoingEmail {
     OutgoingEmail {
         to: to.to_owned(),

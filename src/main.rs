@@ -3,12 +3,16 @@ mod agent;
 mod analytes;
 mod auth;
 mod billing;
+mod clinical_cases;
 mod config;
 mod db;
 mod domain;
 mod email;
 mod entitlements;
 mod insights;
+#[cfg(test)]
+mod invitation_tests;
+mod invitations;
 mod labedit;
 mod labparse;
 mod labvalue;
@@ -18,8 +22,10 @@ mod mcp;
 #[cfg(test)]
 mod mcp_e2e_tests;
 mod ocr;
+mod passports;
 mod photos;
 mod storage;
+mod vet_share;
 mod web;
 
 use anyhow::Context;
